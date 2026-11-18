@@ -41,10 +41,23 @@ jobs:
             cp "$p"/src-tauri/target/x86_64-apple-darwin/release/plugin_* "$p/dist/backend/darwin-x86_64/"
           done
 
+      # windows-latest 自带的 Git Bash Perl 缺 Locale::Maketext::Simple，
+      # 会导致 openssl-sys 源码构建失败；改用 Strawberry Perl（预装，含该模块）
+      - name: Use Strawberry Perl for OpenSSL (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          if [ ! -d "/c/Strawberry/perl/bin" ]; then
+            choco install strawberryperl -y --no-progress
+          fi
+          echo "C:\\Strawberry\\perl\\bin" >> $GITHUB_PATH
+          echo "C:\\Strawberry\\c\\bin" >> $GITHUB_PATH
+
       - name: Build Plugin Backends (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
         run: |
+          perl -MLocale::Maketext::Simple -e 1 && echo "Perl 模块自检通过"
           for p in package/*/; do
             [ -d "$p/src-tauri" ] || continue
             echo "==> backend: $p"
