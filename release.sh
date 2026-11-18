@@ -679,6 +679,101 @@ rerun_latest_action() {
     echo_info "查看构建进度: https://github.com/$REPO_SLUG/actions"
 }
 
+# 将本地 beta 分支远程推送到 main（全程不检出 main，本地只保留 beta 分支）
+#
+# 合并策略（按序判定）:
+#   1. 远程 main 不存在            → 直接推送 beta 首建 main
+#   2. beta 是远程 main 的祖先     → 无新内容，明确提示（不假成功）
+#   3. 远程 main 是 beta 的祖先    → fast-forward 推送（零 merge commit，最常见路径）
+#   4. 分叉                        → GitHub API merge；成功后把含 merge commit 的
+#                                    main 回写到远程 beta（消除分叉，下次回到 ff 路径）
+merge_beta_to_main() {
+    echo ""
+    echo "=== 推送 beta 内容到远程 main 分支 ==="
+    echo ""
+
+    # 检查远程仓库
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
+        return 1
+    fi
+
+    # 校验本地 beta 分支存在
+    if ! git show-ref --verify --quiet refs/heads/beta; then
+        echo_error "本地未找到 beta 分支"
+        return 1
+    fi
+
+    # 工作区必须干净，确保推送内容与本地提交状态一致
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        echo_error "工作区有未提交的更改，请先提交或暂存 (git stash)"
+        git status --short
+        return 1
+    fi
+
+    # 拉取远程最新引用
+    echo_info "拉取远程最新代码..."
+    if ! git fetch "$remote_name" --prune; then
+        echo_error "git fetch 失败"
+        return 1
+    fi
+
+    # 场景 1: 远程 main 尚不存在 → 推送 beta 首建 main
+    if ! git rev-parse --verify -q "refs/remotes/$remote_name/main" >/dev/null; then
+        echo_info "远程 main 不存在，推送 beta 首建..."
+        if git push "$remote_name" beta:main; then
+            echo_success "远程 main 已创建并同步到 beta!"
+            return 0
+        fi
+        echo_error "推送 main 失败，请检查远程仓库权限"
+        return 1
+    fi
+
+    # 场景 2: beta 已被远程 main 包含 → 无新内容（merges API 对此返回 409，
+    # 旧实现回退推送 Everything-up-to-date 后仍显示成功，造成「假成功」）
+    if git merge-base --is-ancestor beta "refs/remotes/$remote_name/main"; then
+        echo_info "远程 main 已包含 beta 全部提交，无需合并"
+        return 0
+    fi
+
+    # 场景 3: fast-forward 可行（远程 main 是 beta 的祖先）→ 直接推送
+    if git merge-base --is-ancestor "refs/remotes/$remote_name/main" beta; then
+        echo_info "远程 main 落后于 beta，fast-forward 推送..."
+        if git push "$remote_name" beta:main; then
+            echo_success "远程 main 已同步到 beta!"
+            return 0
+        fi
+        echo_error "fast-forward 推送失败，请检查远程仓库权限"
+        return 1
+    fi
+
+    # 场景 4: 真分叉 → GitHub API 服务端合并
+    if command -v gh &> /dev/null && gh auth status &> /dev/null && [[ "$REPO_NAME" == */* ]]; then
+        # 先同步远程 beta，保证服务端合并包含本地最新内容
+        echo_info "同步本地 beta 到远程 beta..."
+        if ! git push "$remote_name" beta; then
+            echo_error "推送 beta 失败（远程 beta 可能包含本地没有的提交），请先执行 git pull 同步 beta 分支"
+            return 1
+        fi
+        echo_info "分支已分叉，调用 GitHub API 远程合并 beta -> main..."
+        if merge_output=$(gh api -X POST "repos/$REPO_NAME/merges" -f base=main -f head=beta 2>&1); then
+            echo_success "GitHub API 远程合并完成: beta 已合并到 main!"
+            return 0
+        fi
+        if echo "$merge_output" | grep -qi "conflict"; then
+            echo_error "远程合并存在冲突，无法自动完成，请在本地手动处理"
+            return 1
+        fi
+        echo_error "GitHub API 合并失败: $merge_output"
+        echo_info "分支已分叉且 API 合并失败，请手动处理（本地: git checkout main && git merge beta && git push && git checkout beta）"
+        return 1
+    fi
+
+    echo_error "分支已分叉且未安装/登录 GitHub CLI，无法自动合并: brew install gh && gh auth login"
+    return 1
+}
+
 # 主菜单
 show_menu() {
     echo ""
@@ -691,6 +786,7 @@ show_menu() {
     echo "║  4. 清除 Actions                                ║"
     echo "║  5. 删除 Tag                                    ║"
     echo "║  6. 重新触发最新版本 GitHub Actions              ║"
+    echo "║  7. 推送 beta 内容到远程 main 分支               ║"
     echo "║  0. 退出                                        ║"
     echo "╚══════════════════════════════════════════════════╝"
     echo ""
@@ -702,7 +798,7 @@ main() {
 
     while true; do
         show_menu
-        read -p "请选择操作 (0-6): " choice
+        read -p "请选择操作 (0-7): " choice
 
         case $choice in
             1)
@@ -723,12 +819,15 @@ main() {
             6)
                 rerun_latest_action
                 ;;
+            7)
+                merge_beta_to_main
+                ;;
             0)
                 echo_info "再见!"
                 exit 0
                 ;;
             *)
-                echo_error "无效选择，请输入 0-6"
+                echo_error "无效选择，请输入 0-7"
                 ;;
         esac
 
