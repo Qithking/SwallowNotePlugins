@@ -1,70 +1,105 @@
-# SwallowNote 文档
+# SwallowNote 插件
 
-> SwallowNote 插件系统 API 文档与示例插件源码
+> SwallowNote 插件生态独立仓库：插件系统文档、示例插件、内置插件、SDK 与工具链、市场索引与 CI 发布
 
-## 目录
+## 仓库结构
 
-### 插件系统文档
+```
+.
+├── docs/                  # 插件系统文档与生态资料
+│   ├── plugin-system/     # 插件系统开发文档（API 说明）
+│   ├── plugin-samples/    # 示例插件源码（12 个）
+│   ├── plugin-marketplace/# 市场索引（repo.json）与签名公钥
+│   ├── plugin-rpc/        # 后端共享 RPC crate
+│   └── plugin-template/   # Vite + React 起步模板
+├── sdk/                   # 开发工具链
+│   ├── plugin-kit/        # @swallow-note/plugin-kit — swallow-plugin CLI
+│   └── plugin-sdk/        # @swallow-note/plugin-sdk — 零依赖前端 SDK
+├── package/               # 内置插件工程（含市场索引 repo.json）
+│   ├── ai/ export/ mindmap/ picgo/ wenyan/ secret-disk/
+│   └── repo.json          # 官方市场索引（CI 发布时自动回填）
+└── .github/workflows/     # plugin-release.yml：tag 触发的多平台构建与发布
+```
+
+## 插件系统文档（docs/plugin-system）
 
 | 文档 | 简介 |
 | --- | --- |
-| [plugin-system/README.md](plugin-system/README.md) | 插件系统总览与架构 |
-| [plugin-system/DEVELOPER_GUIDE.md](plugin-system/DEVELOPER_GUIDE.md) | **完整开发指南**（推荐主入口） |
-| [plugin-system/quickstart.md](plugin-system/quickstart.md) | 5 分钟上手：第一个插件 |
-| [plugin-system/manifest.md](plugin-system/manifest.md) | manifest 字段说明 |
-| [plugin-system/lifecycle.md](plugin-system/lifecycle.md) | 生命周期钩子 |
-| [plugin-system/events.md](plugin-system/events.md) | 事件总线 |
-| [plugin-system/storage.md](plugin-system/storage.md) | 持久化存储 |
-| [plugin-system/settings.md](plugin-system/settings.md) | 设置面板 |
-| [plugin-system/context-menu.md](plugin-system/context-menu.md) | 右键菜单贡献 |
-| [plugin-system/backend.md](plugin-system/backend.md) | Rust 后端（可选） |
-| [plugin-system/standalone-development.md](plugin-system/standalone-development.md) | 独立开发指南（不 clone 源码） |
+| [plugin-system/README.md](docs/plugin-system/README.md) | 插件系统总览与架构 |
+| [plugin-system/DEVELOPER_GUIDE.md](docs/plugin-system/DEVELOPER_GUIDE.md) | **完整开发指南**（推荐主入口） |
+| [plugin-system/quickstart.md](docs/plugin-system/quickstart.md) | 5 分钟上手：第一个插件 |
+| [plugin-system/manifest.md](docs/plugin-system/manifest.md) | manifest 字段说明 |
+| [plugin-system/lifecycle.md](docs/plugin-system/lifecycle.md) | 生命周期钩子 |
+| [plugin-system/events.md](docs/plugin-system/events.md) | 事件总线 |
+| [plugin-system/storage.md](docs/plugin-system/storage.md) | 持久化存储 |
+| [plugin-system/settings.md](docs/plugin-system/settings.md) | 设置面板 |
+| [plugin-system/context-menu.md](docs/plugin-system/context-menu.md) | 右键菜单贡献 |
+| [plugin-system/backend.md](docs/plugin-system/backend.md) | Rust 后端（可选） |
+| [plugin-system/standalone-development.md](docs/plugin-system/standalone-development.md) | 独立开发指南（不 clone 主应用源码） |
 
-### 示例插件
+## 示例插件（docs/plugin-samples）
 
 | 示例 | 能力 |
 | --- | --- |
-| [plugin-samples/hello-world](plugin-samples/hello-world) | 最小可运行插件 |
-| [plugin-samples/storage-counter](plugin-samples/storage-counter) | 持久化存储 |
-| [plugin-samples/event-listener](plugin-samples/event-listener) | 事件订阅 |
-| [plugin-samples/settings-dialog](plugin-samples/settings-dialog) | 设置面板 |
-| [plugin-samples/context-menu-item](plugin-samples/context-menu-item) | 右键菜单贡献 |
-| [plugin-samples/full-stack](plugin-samples/full-stack) | 综合示例（5 项能力） |
+| [hello-world](docs/plugin-samples/hello-world) | 最小可运行插件 |
+| [storage-counter](docs/plugin-samples/storage-counter) | 持久化存储 |
+| [event-listener](docs/plugin-samples/event-listener) | 事件订阅 |
+| [settings-dialog](docs/plugin-samples/settings-dialog) | 设置面板 |
+| [context-menu-item](docs/plugin-samples/context-menu-item) | 右键菜单贡献 |
+| [full-stack](docs/plugin-samples/full-stack) | 综合示例（5 项能力） |
 
-### 内置插件
+## 内置插件（package/）
 
 | 插件 | 能力 |
 | --- | --- |
-| [plugins/wenyan](../plugins/wenyan) | 自定义主题、公众号排版、编辑器工具栏、设置 API |
-| [plugins/secret-disk](../plugins/secret-disk) | 加密笔记、编辑器 Tab API、Rust 后端 |
-| [plugins/mindmap](../plugins/mindmap) | 思维导图编辑器、自定义文件编辑器 |
-| [plugins/picgo](../plugins/picgo) | 图床上传、设置 API、面板交互 |
-| [plugins/export](../plugins/export) | 导出 Markdown/DOCX、Rust 后端 |
+| [package/ai](package/ai) | AI 助手、Rust 后端 |
+| [package/wenyan](package/wenyan) | 自定义主题、公众号排版、编辑器工具栏、设置 API |
+| [package/secret-disk](package/secret-disk) | 加密笔记、编辑器 Tab API、Rust 后端 |
+| [package/mindmap](package/mindmap) | 思维导图编辑器、自定义文件编辑器 |
+| [package/picgo](package/picgo) | 图床上传、设置 API、面板交互 |
+| [package/export](package/export) | 导出 Markdown/DOCX、Rust 后端 |
 
-### 独立开发工具
+## 开发工具链（sdk/）
 
 | 工具 | 简介 |
 | --- | --- |
-| [plugin-sdk](plugin-sdk) | `@swallow-note/plugin-sdk` — 零依赖 SDK，无需 clone SwallowNote 源码 |
-| [plugin-kit](plugin-kit) | `@swallow-note/plugin-kit` — `swallow-plugin` CLI（create/build/package）与 `definePluginViteConfig` 构建配置 |
-| [plugin-rpc](plugin-rpc) | 插件后端共享 RPC crate — `PluginBackend` trait + `run()` + 标准错误码，Rust 后端直接依赖 |
-| [plugin-template](plugin-template) | Vite + React 起步项目，开箱即用 dev preview |
+| [sdk/plugin-sdk](sdk/plugin-sdk) | `@swallow-note/plugin-sdk` — 零依赖 SDK，无需 clone SwallowNote 源码 |
+| [sdk/plugin-kit](sdk/plugin-kit) | `@swallow-note/plugin-kit` — `swallow-plugin` CLI（create/build/package）与 `definePluginViteConfig` 构建配置 |
+| [docs/plugin-rpc](docs/plugin-rpc) | 插件后端共享 RPC crate — `PluginBackend` trait + `run()` + 标准错误码，Rust 后端直接依赖 |
+| [docs/plugin-template](docs/plugin-template) | Vite + React 起步项目，开箱即用 dev preview |
+
+## 发布流程
+
+内置插件与市场索引通过 GitHub Actions 自动发布：
+
+1. 更新插件版本（`package/<插件>/package.json` 与 manifest）
+2. 打 tag `plugin-v*` 并推送
+3. CI（[.github/workflows/plugin-release.yml](.github/workflows/plugin-release.yml)）在三平台构建插件后端 → `swallow-plugin package` 打包 → ed25519 签名 → 同步 `package/repo.json` → zip 与索引上传到 GitHub Release
+
+应用内插件市场的官方源地址：
+
+```
+https://github.com/Qithking/SwallowNotePlugins/releases/latest/download/repo.json
+```
+
+签名验证公钥见 [docs/plugin-marketplace/pubkey.b64](docs/plugin-marketplace/pubkey.b64)；签名私钥经 `SWALLOWNOTE_PLUGIN_SIGNING_KEY`（CI Secret / 本地环境变量）提供，**严禁提交**。
 
 ---
 
 ## 快速链接
 
-- **我想独立开发一个插件** → [plugin-template](plugin-template)（推荐先看这个）
-- **我想看 SDK API 文档** → [plugin-sdk/README.md](plugin-sdk/README.md)
-- **我想用 kit 脚手架/构建/打包** → [plugin-kit/README.md](plugin-kit/README.md)
-- **我要写插件 Rust 后端** → [plugin-rpc/README.md](plugin-rpc/README.md)
-- **我想写一个插件（项目内开发）** → [quickstart.md](plugin-system/quickstart.md)
-- **我想看一个能跑的插件** → [plugin-samples/hello-world](plugin-samples/hello-world)
-- **我想知道 manifest 怎么写** → [manifest.md](plugin-system/manifest.md)
-- **我想贡献命令面板条目** → [DEVELOPER_GUIDE.md#命令面板贡献](plugin-system/DEVELOPER_GUIDE.md#命令面板贡献)
-- **我想注册自定义文件编辑器** → [DEVELOPER_GUIDE.md#自定义文件编辑器](plugin-system/DEVELOPER_GUIDE.md#自定义文件编辑器)
-- **我想用编辑器 Tab API** → [DEVELOPER_GUIDE.md#编辑器-tab-api](plugin-system/DEVELOPER_GUIDE.md#编辑器-tab-api)
-- **我想用设置 API** → [DEVELOPER_GUIDE.md#设置-api](plugin-system/DEVELOPER_GUIDE.md#设置-api)
-- **我想用 Frontmatter API** → [DEVELOPER_GUIDE.md#frontmatter-api](plugin-system/DEVELOPER_GUIDE.md#frontmatter-api)
+- **我想独立开发一个插件** → [docs/plugin-template](docs/plugin-template)（推荐先看这个）
+- **我想看 SDK API 文档** → [sdk/plugin-sdk/README.md](sdk/plugin-sdk/README.md)
+- **我想用 kit 脚手架/构建/打包** → [sdk/plugin-kit/README.md](sdk/plugin-kit/README.md)
+- **我要写插件 Rust 后端** → [docs/plugin-rpc/README.md](docs/plugin-rpc/README.md)
+- **我想写一个插件（项目内开发）** → [docs/plugin-system/quickstart.md](docs/plugin-system/quickstart.md)
+- **我想看一个能跑的插件** → [docs/plugin-samples/hello-world](docs/plugin-samples/hello-world)
+- **我想知道 manifest 怎么写** → [docs/plugin-system/manifest.md](docs/plugin-system/manifest.md)
+- **我想了解某个内置插件的实现** → [package/](package/) 下对应插件目录
+- **我想贡献命令面板条目** → [DEVELOPER_GUIDE.md#命令面板贡献](docs/plugin-system/DEVELOPER_GUIDE.md#命令面板贡献)
+- **我想注册自定义文件编辑器** → [DEVELOPER_GUIDE.md#自定义文件编辑器](docs/plugin-system/DEVELOPER_GUIDE.md#自定义文件编辑器)
+- **我想用编辑器 Tab API** → [DEVELOPER_GUIDE.md#编辑器-tab-api](docs/plugin-system/DEVELOPER_GUIDE.md#编辑器-tab-api)
+- **我想用设置 API** → [DEVELOPER_GUIDE.md#设置-api](docs/plugin-system/DEVELOPER_GUIDE.md#设置-api)
+- **我想用 Frontmatter API** → [DEVELOPER_GUIDE.md#frontmatter-api](docs/plugin-system/DEVELOPER_GUIDE.md#frontmatter-api)
 - **我想用某个具体 API** → 上方表格里找对应文档
 - **有问题先看 API 参考** → 每个文档底部都有对应源代码引用
