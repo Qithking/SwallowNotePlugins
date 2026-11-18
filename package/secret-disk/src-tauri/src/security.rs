@@ -3,8 +3,12 @@
 //! 所有密码处理必须经过 `SecretString`（基于 `Zeroizing<String>`），
 //! 密码缓冲区使用 `mlock` 锁定内存页防止被换出到 swap 文件。
 
+// set_permissions/Permissions 仅 Unix 分支使用（0o600 权限模型）
+#[cfg(unix)]
 use std::fs::{set_permissions, Permissions};
 use std::io;
+// PermissionsExt 仅 Unix 可用（0o600 权限模型）；Windows 见 set_secure_permissions
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -61,12 +65,20 @@ impl MemoryLockGuard {
         }
         let ptr = bytes.as_ptr();
         let len = bytes.len();
-        // SAFETY: `mlock` 不会解引用用户指针，仅通知内核固定物理页。
-        // 失败时返回非零 errno，我们转为 `io::Error`。
-        let ret = unsafe { libc::mlock(ptr as *const libc::c_void, len) };
-        if ret != 0 {
-            return Err(io::Error::last_os_error());
+        // Unix: mlock 固定物理页防换出；Windows: VirtualLock 需 kernel32 且 libc 未
+        // 导出，按 spec 降级为不锁（密码仍受 Zeroizing 作用域清零 + SQLCipher
+        // cipher_memory_security 兜底，不阻断 Windows 使用）
+        #[cfg(unix)]
+        {
+            // SAFETY: `mlock` 不会解引用用户指针，仅通知内核固定物理页。
+            // 失败时返回非零 errno，我们转为 `io::Error`。
+            let ret = unsafe { libc::mlock(ptr as *const libc::c_void, len) };
+            if ret != 0 {
+                return Err(io::Error::last_os_error());
+            }
         }
+        #[cfg(not(unix))]
+        let _ = (ptr, len);
         Ok(Self { ptr, len })
     }
 }
@@ -77,16 +89,26 @@ impl Drop for MemoryLockGuard {
             return;
         }
         // SAFETY: 与 `lock` 中的 `mlock` 配对，参数相同。
+        #[cfg(unix)]
         let _ = unsafe { libc::munlock(self.ptr as *const libc::c_void, self.len) };
+        #[cfg(not(unix))]
+        let _ = (self.ptr, self.len);
     }
 }
 
 /// 设置文件权限为 0600（仅所有者可读写）。
 ///
 /// 用于 .swl 文件创建、导入替换、备份导出。Unix 系统通过 `PermissionsExt`，
-/// 非 Unix 系统无操作（spec 仅要求 Unix）。
+/// 非 Unix 系统无操作（spec 仅要求 Unix，NTFS 权限模型不同不适用 0o600）。
+#[cfg(unix)]
 pub fn set_secure_permissions<P: AsRef<Path>>(path: P) -> io::Result<()> {
     set_permissions(path, Permissions::from_mode(0o600))
+}
+
+/// Windows 版本：NTFS 无 0o600 模型，按 spec 无操作。
+#[cfg(not(unix))]
+pub fn set_secure_permissions<P: AsRef<Path>>(_path: P) -> io::Result<()> {
+    Ok(())
 }
 
 /// 安全日志输出：仅输出错误类型，禁止包含密码、PRAGMA key 参数、明文内容。
