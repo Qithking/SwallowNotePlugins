@@ -1,0 +1,138 @@
+name: Plugin Release
+run-name: plugin release
+
+# 插件仓库独立发布：tag 触发（plugin-v*），三平台构建插件后端，
+# 经 sdk/plugin-kit 的 package 命令打包签名（构建→确定性 zip→ed25519→repo.json 同步）
+on:
+  push:
+    tags:
+      - 'plugin-v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      fail-fast: true
+      matrix:
+        platform: [macos-15, windows-latest, ubuntu-22.04]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 插件后端按宿主 host_platform_dir() 约定的平台子目录落位（zip 双布局）
+      - name: Build Plugin Backends (macOS)
+        if: matrix.platform == 'macos-15'
+        shell: bash
+        run: |
+          rustup target add x86_64-apple-darwin
+          for p in package/*/; do
+            [ -d "$p/src-tauri" ] || continue
+            echo "==> backend: $p"
+            (cd "$p/src-tauri" && cargo build --release --target aarch64-apple-darwin)
+            (cd "$p/src-tauri" && cargo build --release --target x86_64-apple-darwin)
+            mkdir -p "$p/dist/backend/darwin-aarch64" "$p/dist/backend/darwin-x86_64"
+            cp "$p"/src-tauri/target/aarch64-apple-darwin/release/plugin_* "$p/dist/backend/darwin-aarch64/"
+            cp "$p"/src-tauri/target/x86_64-apple-darwin/release/plugin_* "$p/dist/backend/darwin-x86_64/"
+          done
+
+      - name: Build Plugin Backends (Windows)
+        if: matrix.platform == 'windows-latest'
+        shell: bash
+        run: |
+          for p in package/*/; do
+            [ -d "$p/src-tauri" ] || continue
+            echo "==> backend: $p"
+            (cd "$p/src-tauri" && cargo build --release)
+            mkdir -p "$p/dist/backend/windows-x86_64"
+            cp "$p"/src-tauri/target/release/plugin_*.exe "$p/dist/backend/windows-x86_64/"
+          done
+
+      - name: Build Plugin Backends (Linux)
+        if: matrix.platform == 'ubuntu-22.04'
+        shell: bash
+        run: |
+          for p in package/*/; do
+            [ -d "$p/src-tauri" ] || continue
+            echo "==> backend: $p"
+            (cd "$p/src-tauri" && cargo build --release)
+            mkdir -p "$p/dist/backend/linux-x86_64"
+            cp "$p"/src-tauri/target/release/plugin_* "$p/dist/backend/linux-x86_64/"
+          done
+
+      - name: Upload Plugin Backend Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-backends-${{ matrix.platform }}
+          path: package/*/dist/backend/**
+          retention-days: 7
+          if-no-files-found: ignore
+
+  release:
+    name: package & publish
+    needs: build
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # 合并三平台后端产物回 package/*/dist/backend
+      - name: Download Backend Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: plugin-backends-*
+          path: merged-backends
+
+      - name: Merge Artifacts Into Layout
+        run: |
+          for dir in merged-backends/*/; do
+            cp -R "$dir." .
+          done
+          find package/*/dist/backend -type f | sort
+
+      # 构建 plugin-kit（tsc），供后续 package 命令使用
+      - name: Build plugin-kit
+        run: |
+          cd sdk/plugin-kit && npm ci && npm run build
+
+      # 打包签名（--no-bump：版本以 package.json 为准，tag 前手动 bump）
+      - name: Package & Sign Plugins
+        env:
+          SWALLOWNOTE_PLUGIN_SIGNING_KEY: ${{ secrets.SWALLOWNOTE_PLUGIN_SIGNING_KEY }}
+        run: |
+          for p in package/*/; do
+            name=$(basename "$p")
+            [ -f "$p/package.json" ] || continue
+            echo "==> package: $name"
+            (cd "$p" && node "$GITHUB_WORKSPACE/sdk/plugin-kit/dist/cli.js" package --no-bump)
+          done
+
+      - name: Verify Repo Index
+        run: |
+          find . -name "repo.json" -not -path "*/node_modules/*" | sort
+          cat package/repo.json | head -30
+
+      - name: Upload Plugin Packages to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            package/*/com.swallownote.*.zip
+            package/repo.json
+          draft: false
+          prerelease: false
+          overwrite: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
