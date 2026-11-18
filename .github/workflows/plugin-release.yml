@@ -130,6 +130,18 @@ jobs:
         env:
           SWALLOWNOTE_PLUGIN_SIGNING_KEY: ${{ secrets.SWALLOWNOTE_PLUGIN_SIGNING_KEY }}
         run: |
+          # fail fast：签名密钥缺失时静默空签名会让发布产物被市场拒绝，
+          # 与其 20 分钟后才发现不如立即失败
+          if [ -z "$SWALLOWNOTE_PLUGIN_SIGNING_KEY" ]; then
+            echo "::error::Secret SWALLOWNOTE_PLUGIN_SIGNING_KEY 未配置（Settings→Secrets→Actions），无法签名"
+            exit 1
+          fi
+
+          # plugin-sdk 的 dist 入口被 .gitignore 忽略，须先构建（插件源码
+          # import '@swallow-note/plugin-sdk'，无 dist 则 vite 解析失败）
+          echo "==> build plugin-sdk"
+          (cd sdk/plugin-sdk && npm ci --silent && npm run build --silent)
+
           # 打包前必须安装插件依赖：vite.config.ts 导入 @swallow-note/plugin-kit
           # （file:../../sdk/plugin-kit），未 install 时 vite 加载 config 即失败
           for p in package/*/; do

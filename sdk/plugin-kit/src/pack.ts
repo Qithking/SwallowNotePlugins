@@ -1,4 +1,4 @@
-import { copyFileSync, existsSync, readFileSync } from 'node:fs'
+import { copyFileSync, existsSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { join, resolve } from 'node:path'
 import { writeDeterministicZip, type ZipEntry } from './zip.js'
@@ -108,9 +108,38 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
     zipEntries.push({ name: 'settings.json', data: readFileSync(join(distDir, 'settings.json')), mode: 0o644 })
   }
   if (project.hasBackend) {
-    // backend/ 目录条目 + 二进制条目，与现有 zip 内容清单一致；目录条目置于二进制之前
+    // backend/ 目录条目 + 二进制条目；收集全部布局：根（本地构建）+ 平台子目录
+    // （CI 多平台产物 backend/<平台>/plugin_<id>），与宿主 host_platform_dir →
+    // 根兜底的解析顺序一致，保证 zip 内含全部平台二进制
     zipEntries.push({ name: 'backend/', data: null, mode: 0o755 })
-    zipEntries.push({ name: `backend/plugin_${project.pluginId}`, data: readFileSync(join(distDir, 'backend', `plugin_${project.pluginId}`)), mode: 0o755 })
+    const backendDir = join(distDir, 'backend')
+    const backendRels: string[] = []
+    if (existsSync(backendDir)) {
+      for (const entry of readdirSync(backendDir)) {
+        if (entry === `plugin_${project.pluginId}`) {
+          backendRels.push(entry)
+          continue
+        }
+        const sub = join(backendDir, entry)
+        if (statSync(sub).isDirectory()) {
+          for (const f of readdirSync(sub)) {
+            if (f.startsWith(`plugin_${project.pluginId}`)) {
+              backendRels.push(`${entry}/${f}`)
+            }
+          }
+        }
+      }
+    }
+    if (backendRels.length === 0) {
+      throw new Error(`backend 二进制缺失: ${backendDir}/plugin_${project.pluginId}`)
+    }
+    for (const rel of backendRels) {
+      zipEntries.push({
+        name: `backend/${rel}`,
+        data: readFileSync(join(backendDir, rel)),
+        mode: 0o755,
+      })
+    }
   }
 
   // ─── 确定性 zip（固定顺序 / mtime / 压缩选项，两次构建字节一致） ──────────
