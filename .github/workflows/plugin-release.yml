@@ -130,9 +130,13 @@ jobs:
         env:
           SWALLOWNOTE_PLUGIN_SIGNING_KEY: ${{ secrets.SWALLOWNOTE_PLUGIN_SIGNING_KEY }}
         run: |
+          # 打包前必须安装插件依赖：vite.config.ts 导入 @swallow-note/plugin-kit
+          # （file:../../sdk/plugin-kit），未 install 时 vite 加载 config 即失败
           for p in package/*/; do
             name=$(basename "$p")
             [ -f "$p/package.json" ] || continue
+            echo "==> npm install: $name"
+            (cd "$p" && npm install --no-audit --no-fund 2>&1 | tail -1)
             echo "==> package: $name"
             (cd "$p" && node "$GITHUB_WORKSPACE/sdk/plugin-kit/dist/cli.js" package --no-bump)
           done
