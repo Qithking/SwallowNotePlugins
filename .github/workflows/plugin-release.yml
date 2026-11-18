@@ -56,8 +56,12 @@ jobs:
       - name: Build Plugin Backends (Windows)
         if: matrix.platform == 'windows-latest'
         shell: bash
+        # openssl-src 优先读 PERL 环境变量定位 perl（比 PATH 可靠——
+        # MSYS/Git Bash 的旧 perl 在 PATH 里始终排在 Strawberry 前）
+        env:
+          PERL: C:/Strawberry/perl/bin/perl.exe
         run: |
-          perl -MLocale::Maketext::Simple -e 1 && echo "Perl 模块自检通过"
+          "$PERL" -MLocale::Maketext::Simple -e 1 && echo "Perl 模块自检通过 (PERL=$PERL)"
           for p in package/*/; do
             [ -d "$p/src-tauri" ] || continue
             echo "==> backend: $p"
