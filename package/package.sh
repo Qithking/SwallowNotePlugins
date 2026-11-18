@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 #
-# plugins/package.sh — 插件可复现打包 + 签名 + 索引更新一站式脚本
+# package/package.sh — 插件可复现打包 + 签名 + 索引更新一站式脚本
 #
 # 用法:
-#   ./plugins/package.sh <plugin-name> <changelog>
-#   例: ./plugins/package.sh picgo "v0.1.4: 清理已废弃权限声明"
+#   ./package/package.sh <plugin-name> <changelog>
+#   例: ./package/package.sh picgo "v0.1.4: 清理已废弃权限声明"
 #
 # 可复现保证: zip 内所有条目使用固定时间戳(2020-01-01)、固定权限、
 # 固定排序与压缩级别 —— 相同源文件产物字节级一致，sha256 稳定。
@@ -13,15 +13,15 @@
 #   1. 校验 dist/manifest.json 与仓库 manifest.json 一致（防止打包过时源）
 #   2. 按标准结构打包: index.js / manifest.json / settings.json(顶层优先,
 #      回退 dist) / backend/*(dist/backend 下有则带 backend/ 前缀)
-#   3. sign_plugin 签名并更新 plugins/repo.json
+#   3. sign_plugin 签名并更新 package/repo.json
 #      (version/sha256/signature_b64/changelog/published_at/updated_at)
 #   4. 输出摘要。git add/commit/push 由使用者自行执行。
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-PLUGIN_NAME="${1:?用法: ./plugins/package.sh <plugin-name> <changelog>}"
+PLUGIN_NAME="${1:?用法: ./package/package.sh <plugin-name> <changelog>}"
 CHANGELOG="${2:?缺少 changelog 参数}"
-PLUGIN_DIR="$REPO_ROOT/plugins/$PLUGIN_NAME"
+PLUGIN_DIR="$REPO_ROOT/package/$PLUGIN_NAME"
 ZIP_PATH="$PLUGIN_DIR/com.swallownote.$PLUGIN_NAME.zip"
 
 [ -d "$PLUGIN_DIR" ] || { echo "错误: 插件目录不存在: $PLUGIN_DIR" >&2; exit 1; }
@@ -113,7 +113,7 @@ SIG=$(cargo run --quiet --manifest-path "$REPO_ROOT/src-tauri/Cargo.toml" \
 [ -n "$SIG" ] || { echo "错误: 签名失败" >&2; exit 1; }
 
 PUBLISHED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-python3 - "$REPO_ROOT/plugins/repo.json" "$PLUGIN_NAME" "$SIG" "$CHANGELOG" "$PUBLISHED_AT" <<'PYEOF'
+python3 - "$REPO_ROOT/package/repo.json" "$PLUGIN_NAME" "$SIG" "$CHANGELOG" "$PUBLISHED_AT" <<'PYEOF'
 import hashlib, json, sys, collections
 
 repo_json, name, sig, changelog, published = sys.argv[1:6]
@@ -121,9 +121,9 @@ entry_id = f"com.swallownote.{name}"
 with open(repo_json, encoding="utf-8") as f:
     data = json.load(f, object_pairs_hook=collections.OrderedDict)
 
-with open(f"plugins/{name}/manifest.json", encoding="utf-8") as f:
+with open(f"package/{name}/manifest.json", encoding="utf-8") as f:
     version = json.load(f)["version"]
-with open(f"plugins/{name}/com.swallownote.{name}.zip", "rb") as f:
+with open(f"package/{name}/com.swallownote.{name}.zip", "rb") as f:
     sha256 = hashlib.sha256(f.read()).hexdigest()
 
 for p in data["plugins"]:
@@ -145,4 +145,4 @@ with open(repo_json, "w", encoding="utf-8") as f:
 print(f"repo.json 已更新: {entry_id} v{version} sha256={sha256[:12]}...")
 PYEOF
 
-echo "完成。下一步: git add plugins/$PLUGIN_NAME plugins/repo.json && git commit && git push"
+echo "完成。下一步: git add package/$PLUGIN_NAME package/repo.json && git commit && git push"

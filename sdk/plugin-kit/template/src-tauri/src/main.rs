@@ -1,7 +1,7 @@
 //! __PLUGIN_NAME__ 插件 Rust 后端。
 //!
 //! 宿主以子进程方式拉起本二进制，经 stdin/stdout 交换 JSON-RPC 帧
-//! （协议由 swallow-plugin-rpc 封装，源码见仓库 docs/plugin-rpc）。
+//! （协议由 swallow-plugin-rpc 封装，源码见仓库 sdk/plugin-rpc）。
 //! 本示例实现一个 echo 命令：原样返回收到的 message 字段。
 
 use swallow_plugin_rpc::{run, PluginBackend, RpcError};

@@ -9,7 +9,7 @@ SwallowNote 插件共享构建工具。把原先每个插件各自复制一份�
 // package.json
 {
   "devDependencies": {
-    "@swallow-note/plugin-kit": "file:../../docs/plugin-kit"
+    "@swallow-note/plugin-kit": "file:../../sdk/plugin-kit"
   }
 }
 ```

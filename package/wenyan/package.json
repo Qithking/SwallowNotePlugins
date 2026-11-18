@@ -14,7 +14,7 @@
     "@radix-ui/react-radio-group": "^1.3.0",
     "@radix-ui/react-select": "^2.2.0",
     "@radix-ui/react-slot": "^1.2.0",
-    "@swallow-note/plugin-sdk": "file:../../docs/plugin-sdk",
+    "@swallow-note/plugin-sdk": "file:../../sdk/plugin-sdk",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "@wenyan-md/core": "^3.0.10",
@@ -27,7 +27,7 @@
     "tailwind-merge": "^2.5.0"
   },
   "devDependencies": {
-    "@swallow-note/plugin-kit": "file:../../docs/plugin-kit",
+    "@swallow-note/plugin-kit": "file:../../sdk/plugin-kit",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^4.3.0",

@@ -11,7 +11,7 @@
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.18",
-    "@swallow-note/plugin-sdk": "file:../../docs/plugin-sdk",
+    "@swallow-note/plugin-sdk": "file:../../sdk/plugin-sdk",
     "@tauri-apps/api": "^2.0.0",
     "@tauri-apps/plugin-dialog": "^2.0.0",
     "lucide-react": "^0.460.0",
@@ -19,7 +19,7 @@
     "react-dom": "^19.2.6"
   },
   "devDependencies": {
-    "@swallow-note/plugin-kit": "file:../../docs/plugin-kit",
+    "@swallow-note/plugin-kit": "file:../../sdk/plugin-kit",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.5.0",

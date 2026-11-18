@@ -19,7 +19,7 @@ npm install @swallow-note/plugin-sdk react react-dom
 或使用 `plugin-template/` 起步项目：
 
 ```bash
-cp -r docs/plugin-template my-plugin
+cp -r sdk/plugin-template my-plugin
 cd my-plugin
 npm install
 npm run dev

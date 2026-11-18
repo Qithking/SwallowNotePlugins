@@ -17,7 +17,7 @@
     "@radix-ui/react-select": "^2.2.6",
     "@radix-ui/react-slot": "^1.2.4",
     "@radix-ui/react-switch": "^1.2.6",
-    "@swallow-note/plugin-sdk": "file:../../docs/plugin-sdk",
+    "@swallow-note/plugin-sdk": "file:../../sdk/plugin-sdk",
     "clsx": "^2.1.1",
     "lucide-react": "^0.460.0",
     "react": "^19.2.6",
@@ -26,7 +26,7 @@
     "tailwind-merge": "^2.5.4"
   },
   "devDependencies": {
-    "@swallow-note/plugin-kit": "file:../../docs/plugin-kit",
+    "@swallow-note/plugin-kit": "file:../../sdk/plugin-kit",
     "@types/react": "^19.2.15",
     "@types/react-dom": "^19.2.3",
     "typescript": "^5.5.0",

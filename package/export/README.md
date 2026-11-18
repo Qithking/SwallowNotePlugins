@@ -127,7 +127,7 @@ com.swallownote.export.zip  # 最终可安装的插件包
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@swallow-note/plugin-sdk": "file:../../docs/plugin-sdk",
+    "@swallow-note/plugin-sdk": "file:../../sdk/plugin-sdk",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
@@ -221,7 +221,7 @@ export default defineConfig(({ mode }) => {
     "resolveJsonModule": true,
     "isolatedModules": true
   },
-  "include": ["src", "../../docs/plugin-sdk/src"]
+  "include": ["src", "../../sdk/plugin-sdk/src"]
 }
 ```
 

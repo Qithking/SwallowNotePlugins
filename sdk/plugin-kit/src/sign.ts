@@ -14,7 +14,7 @@ const KIT_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
 /**
  * 定位 SwallowNote 宿主仓库根：优先 SWALLOWNOTE_REPO_ROOT 环境变量，
- * 否则按 kit 自身位置（<repo>/docs/plugin-kit）向上推两级。
+ * 否则按 kit 自身位置（<repo>/sdk/plugin-kit）向上推两级。
  * 签名工具是宿主仓库的 cargo example，必须用宿主的 src-tauri/Cargo.toml。
  */
 export function resolveHostRepoRoot(): string {

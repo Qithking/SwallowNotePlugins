@@ -1,5 +1,5 @@
 /**
- * 插件权限目录：镜像宿主 / docs/plugin-sdk 的 PluginPermission 固定集合。
+ * 插件权限目录：镜像宿主 / sdk/plugin-sdk 的 PluginPermission 固定集合。
  * （独立模块避免 create 在类型层面依赖 SDK 源码。）
  * 仅收录宿主实际强制的 8 项（PL-5）。
  */
