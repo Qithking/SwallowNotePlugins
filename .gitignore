@@ -1,0 +1,22 @@
+# 依赖
+node_modules/
+
+# 编译产物（vite/tsc/rust 构建输出，均由构建时生成，不入库）
+dist/
+target/
+backend/
+
+# 插件发布包（发布产物由 CI tag 触发生成并上传 Release，不提交仓库）
+*.zip
+
+# 系统与日志
+.DS_Store
+*.log
+
+# 编辑器/本地工具
+.trae/
+.trae-html-share-packages/
+.screenshots/
+.work/
+.claude/
+ai-notes/
