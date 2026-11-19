@@ -1,5 +1,7 @@
 name: Plugin Release
-run-name: plugin release
+# 运行标题：单插件 dispatch 时标注插件名（release job 里会重命名补上版本号），
+# tag push 与全量 dispatch 保持原样
+run-name: "${{ github.event_name == 'workflow_dispatch' && inputs.plugin != '' && format('插件发布: {0}', inputs.plugin) || 'plugin release' }}"
 
 # 插件仓库独立发布：
 #  - tag 触发（plugin-v*）：三平台构建全部插件后端，打包签名发布
@@ -128,6 +130,17 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      # 单插件发布时重命名运行标题为「插件名 + 版本号」（版本读该插件 package.json，
+      # 与 --no-bump 打包所用版本同源，保证标题与实际产物一致）
+      - name: Rename Run With Plugin Version
+        if: env.RELEASE_PLUGIN != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ver=$(node -p "require('./package/$RELEASE_PLUGIN/package.json').version")
+          gh run rename "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
+            --name "插件发布: $RELEASE_PLUGIN v$ver"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
