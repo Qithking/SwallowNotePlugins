@@ -43,6 +43,13 @@ interface PluginIndexEntry {
   dependencies: string[]              // 依赖的对等插件 id
   permissions?: string[]              // 作者声明的权限列表（可选，与插件 manifest 一致）；
                                       // 缺失 = 未声明，详情页安装前将显示空状态
+  platforms?: string[]                // 支持的宿主平台目录名列表（可选）；
+                                      // 如 ["darwin-aarch64","windows-x86_64"]。
+                                      // 缺失/空 = 全平台兼容（纯前端插件或旧格式索引）。
+                                      // 不兼容条目在市场列表中仍可见，但安装按钮禁用并
+                                      // 显示「不支持当前平台」，且不参与自动更新检查。
+                                      // `swallow-plugin package` 会检测 backend/<平台>/
+                                      // 子目录自动推断并回填本字段，通常无需手写。
 }
 
 interface PluginIndexEntryVersion {

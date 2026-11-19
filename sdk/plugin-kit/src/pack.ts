@@ -74,6 +74,50 @@ export function collectBackendFiles(project: PluginProject): BackendFile[] {
     .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
 }
 
+/** Node 平台/架构 → 打包平台目录名（与宿主 host_platform_dir 命名约定一致）。 */
+const PLATFORM_DIR_BY_NODE_PLATFORM: Record<string, string> = {
+  'darwin-arm64': 'darwin-aarch64',
+  'darwin-x64': 'darwin-x86_64',
+  'win32-x64': 'windows-x86_64',
+  'linux-x64': 'linux-x86_64',
+  'linux-arm64': 'linux-aarch64',
+}
+
+function hostPlatformDir(): string | undefined {
+  return PLATFORM_DIR_BY_NODE_PLATFORM[`${process.platform}-${process.arch}`]
+}
+
+/**
+ * 推断 zip 实际支持的平台目录名列表（repo.json 条目的 `platforms` 字段）：
+ *  - 插件根 `backend/<平台>/` 子目录（CI 多平台产物，dist 外不受 vite build 清空影响）；
+ *  - zip 内含 dist/backend 根二进制（本地 pack 场景）→ 追加当前打包机平台。
+ * 纯前端插件（无 backend）返回 undefined = 全平台兼容；宿主以
+ * `platforms` 缺失/空作为「无平台限制」的判定依据。
+ */
+export function detectSupportedPlatforms(
+  project: PluginProject,
+  backendFiles?: BackendFile[],
+): string[] | undefined {
+  if (!project.hasBackend) return undefined
+  const platforms = new Set<string>()
+  const backendDir = join(project.dir, 'backend')
+  if (existsSync(backendDir)) {
+    for (const entry of readdirSync(backendDir)) {
+      if (
+        statSync(join(backendDir, entry)).isDirectory() &&
+        /^[a-z]+-(x86_64|aarch64)$/.test(entry)
+      ) {
+        platforms.add(entry)
+      }
+    }
+  }
+  if (backendFiles?.some((f) => !f.rel.includes('/'))) {
+    const host = hostPlatformDir()
+    if (host) platforms.add(host)
+  }
+  return platforms.size > 0 ? [...platforms].sort() : undefined
+}
+
 /**
  * swallow-plugin package —— 等价平移各插件 package.sh 全流程：
  *   版本 bump（manifest.json / package.json / Cargo.toml）
@@ -104,6 +148,8 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
   if (opts.dryRun) {
     const repoJsonPath = resolve(pluginDir, '..', 'repo.json')
     if (existsSync(repoJsonPath)) {
+      // dry-run 阶段未构建，仅从插件根 backend/<平台>/ 推断平台
+      const platforms = detectSupportedPlatforms(project)
       const preview = previewRepoSync(repoJsonPath, {
         pluginId: project.pluginId,
         version: newVersion,
@@ -111,6 +157,7 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
         publishedAt,
         signatureB64: '<有签名密钥时为签名 base64，否则清除>',
         pubkeyB64: '<有签名密钥时为公钥 base64>',
+        platforms,
       })
       if (preview.found) {
         console.log('\n[dry-run] repo.json 条目将变更为：')
@@ -154,6 +201,8 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
     copyFileSync(join(pluginDir, 'settings.json'), join(distDir, 'settings.json'))
     zipEntries.push({ name: 'settings.json', data: readFileSync(join(distDir, 'settings.json')), mode: 0o644 })
   }
+  // 平台推断：结合本次 zip 实际携带的 backend 文件（含 dist 根二进制 → 打包机平台）
+  let platforms: string[] | undefined
   if (project.hasBackend) {
     // backend/ 目录条目 + 二进制条目；来源：dist/backend（当前平台）+ 插件根 backend/<平台>（CI 多平台）
     zipEntries.push({ name: 'backend/', data: null, mode: 0o755 })
@@ -163,6 +212,7 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
         `backend 二进制缺失: ${join(distDir, 'backend')}/ 与 ${join(pluginDir, 'backend')}/<平台>/ 下均未找到 plugin_${project.pluginId}`,
       )
     }
+    platforms = detectSupportedPlatforms(project, backendFiles)
     for (const f of backendFiles) {
       zipEntries.push({
         name: `backend/${f.rel}`,
@@ -203,6 +253,7 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
       publishedAt,
       signatureB64,
       pubkeyB64,
+      platforms,
     })
     if (result === 'not-found') {
       throw new Error(
@@ -213,6 +264,7 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
     console.log(`  ✓ sha256        = ${sha256}`)
     console.log(`  ✓ published_at  = ${publishedAt}`)
     console.log(`  ✓ updated_at    = 刷新为当前时间`)
+    console.log(`  ✓ platforms     = ${platforms ? platforms.join(', ') : '未声明（全平台兼容）'}`)
   }
 
   console.log('\n安装方式：插件管理器 → 拖拽或选择 zip 文件')

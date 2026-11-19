@@ -12,11 +12,13 @@ export interface RepoSyncInput {
   signatureB64: string
   /** 签名公钥 base64；非空时写入 repo.json 顶层供市场校验 */
   pubkeyB64: string
+  /** 支持的平台目录名列表（如 darwin-aarch64）；非空时写入条目，空/缺省时删除该键 = 全平台兼容 */
+  platforms?: string[]
 }
 
 /**
  * 同步 plugins/repo.json（市场索引）——逐字段平移 package.sh 内嵌 python 逻辑：
- *  - 仅回填 version / sha256 / published_at / signature_b64；
+ *  - 仅回填 version / sha256 / published_at / signature_b64 / platforms；
  *  - download_url / changelog / tags 等静态字段原样保留；
  *  - 重打包后旧签名必然失效：无新签名时清除残留 signature_b64；
  *  - updated_at 刷新为当前时间，公钥随索引分发到顶层 pubkey_b64。
@@ -38,6 +40,11 @@ export function syncRepoJson(input: RepoSyncInput): 'updated' | 'not-found' {
     entry.signature_b64 = input.signatureB64
   } else {
     delete entry.signature_b64
+  }
+  if (input.platforms && input.platforms.length > 0) {
+    entry.platforms = input.platforms
+  } else {
+    delete entry.platforms
   }
 
   repo.updated_at = new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
@@ -72,6 +79,11 @@ export function previewRepoSync(
     afterEntry.signature_b64 = input.signatureB64
   } else {
     delete afterEntry.signature_b64
+  }
+  if (input.platforms && input.platforms.length > 0) {
+    afterEntry.platforms = input.platforms
+  } else {
+    delete afterEntry.platforms
   }
   return { found: true, before, after: JSON.stringify(afterEntry, null, 2) }
 }
