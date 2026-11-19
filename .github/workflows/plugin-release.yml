@@ -1,12 +1,24 @@
 name: Plugin Release
 run-name: plugin release
 
-# 插件仓库独立发布：tag 触发（plugin-v*），三平台构建插件后端，
-# 经 sdk/plugin-kit 的 package 命令打包签名（构建→确定性 zip→ed25519→repo.json 同步）
+# 插件仓库独立发布：
+#  - tag 触发（plugin-v*）：三平台构建全部插件后端，打包签名发布
+#  - workflow_dispatch：手动指定单个插件发布（三平台只构建该插件，
+#    只上传该插件 zip + repo.json），用于单插件迭代免全量重发
 on:
   push:
     tags:
       - 'plugin-v*'
+  workflow_dispatch:
+    inputs:
+      plugin:
+        description: '指定插件（package/ 目录名，留空=全部插件）'
+        required: false
+        default: ''
+      tag:
+        description: '发布目标 tag（如 plugin-v0.1.9，留空=最新 plugin-v* tag）'
+        required: false
+        default: ''
 
 permissions:
   contents: write
@@ -18,6 +30,9 @@ jobs:
       matrix:
         platform: [macos-15, windows-latest, ubuntu-22.04]
     runs-on: ${{ matrix.platform }}
+    # 指定插件名（tag push 事件下 inputs 为空 = 全部插件）
+    env:
+      RELEASE_PLUGIN: ${{ inputs.plugin }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -31,8 +46,10 @@ jobs:
         shell: bash
         run: |
           rustup target add x86_64-apple-darwin
+          # RELEASE_PLUGIN 非空时只构建指定插件（workflow_dispatch 单插件发布）
           for p in package/*/; do
             [ -d "$p/src-tauri" ] || continue
+            if [ -n "$RELEASE_PLUGIN" ] && [ "$(basename "$p")" != "$RELEASE_PLUGIN" ]; then continue; fi
             echo "==> backend: $p"
             (cd "$p/src-tauri" && cargo build --release --target aarch64-apple-darwin)
             (cd "$p/src-tauri" && cargo build --release --target x86_64-apple-darwin)
@@ -66,6 +83,7 @@ jobs:
           "$PERL" -MLocale::Maketext::Simple -e 1 && echo "Perl 模块自检通过 (PERL=$PERL)"
           for p in package/*/; do
             [ -d "$p/src-tauri" ] || continue
+            if [ -n "$RELEASE_PLUGIN" ] && [ "$(basename "$p")" != "$RELEASE_PLUGIN" ]; then continue; fi
             echo "==> backend: $p"
             (cd "$p/src-tauri" && cargo build --release)
             mkdir -p "$p/backend/windows-x86_64"
@@ -78,24 +96,30 @@ jobs:
         run: |
           for p in package/*/; do
             [ -d "$p/src-tauri" ] || continue
+            if [ -n "$RELEASE_PLUGIN" ] && [ "$(basename "$p")" != "$RELEASE_PLUGIN" ]; then continue; fi
             echo "==> backend: $p"
             (cd "$p/src-tauri" && cargo build --release)
             mkdir -p "$p/backend/linux-x86_64"
             cp "$p"/src-tauri/target/release/plugin_* "$p/backend/linux-x86_64/"
           done
 
+      # 指定纯前端插件（无 src-tauri）时无产物，warn 而非 error；
+      # 全量发布（tag push）仍靠 release job 的合并断言兜底
       - name: Upload Plugin Backend Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: plugin-backends-${{ matrix.platform }}
           path: package/*/backend/**
           retention-days: 7
-          if-no-files-found: error
+          if-no-files-found: warn
 
   release:
     name: package & publish
     needs: build
     runs-on: ubuntu-22.04
+    env:
+      RELEASE_PLUGIN: ${{ inputs.plugin }}
+      RELEASE_TAG: ${{ inputs.tag }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -121,9 +145,15 @@ jobs:
           for dir in merged-backends/*/; do
             cp -R "$dir." package/
           done
-          # 显式断言：合并后必须存在平台子目录下的后端二进制，避免空产物静默通过
-          files=$(find package -type f -path '*/backend/*/plugin_*')
-          [ -n "$files" ] || { echo "::error::后端产物合并为空，请检查 artifact 内部目录结构"; exit 1; }
+          # 显式断言：合并后必须存在平台子目录下的后端二进制，避免空产物静默通过；
+          # 指定纯前端插件（无 src-tauri）时允许为空
+          if [ -n "$RELEASE_PLUGIN" ]; then
+            files=$(find "package/$RELEASE_PLUGIN" -type f -path '*/backend/*/plugin_*' 2>/dev/null || true)
+            echo "指定插件: $RELEASE_PLUGIN（无后端产物则为纯前端插件）"
+          else
+            files=$(find package -type f -path '*/backend/*/plugin_*')
+            [ -n "$files" ] || { echo "::error::后端产物合并为空，请检查 artifact 内部目录结构"; exit 1; }
+          fi
           echo "$files" | sort
 
       # 构建 plugin-kit（tsc），供后续 package 命令使用
@@ -149,10 +179,12 @@ jobs:
           (cd sdk/plugin-sdk && npm ci --silent && npm run build --silent)
 
           # 打包前必须安装插件依赖：vite.config.ts 导入 @swallow-note/plugin-kit
-          # （file:../../sdk/plugin-kit），未 install 时 vite 加载 config 即失败
+          # （file:../../sdk/plugin-kit），未 install 时 vite 加载 config 即失败；
+          # RELEASE_PLUGIN 非空时只打包指定插件
           for p in package/*/; do
             name=$(basename "$p")
             [ -f "$p/package.json" ] || continue
+            if [ -n "$RELEASE_PLUGIN" ] && [ "$name" != "$RELEASE_PLUGIN" ]; then continue; fi
             echo "==> npm install: $name"
             (cd "$p" && npm install --no-audit --no-fund 2>&1 | tail -1)
             echo "==> package: $name"
@@ -164,14 +196,31 @@ jobs:
           find . -name "repo.json" -not -path "*/node_modules/*" | sort
           cat package/repo.json | head -30
 
+      # 发布目标 tag：workflow_dispatch 用 input.tag（缺省取最新 plugin-v* tag），
+      # tag push 用触发 tag 本身；release 不存在则创建（--generate-notes 等价原 softprops）
+      - name: Resolve Target Tag
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            TARGET="$RELEASE_TAG"
+          elif [ "${{ github.event_name }}" = "push" ] && [[ "${{ github.ref_name }}" == plugin-v* ]]; then
+            TARGET="${{ github.ref_name }}"
+          else
+            TARGET=$(git describe --tags --match 'plugin-v*' --abbrev=0)
+          fi
+          echo "RELEASE_TAG=$TARGET" >> "$GITHUB_ENV"
+          echo "发布目标: $TARGET"
+
       - name: Upload Plugin Packages to Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            package/*/com.swallownote.*.zip
-            package/repo.json
-          draft: false
-          prerelease: false
-          overwrite: true
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # 目标 release 不存在则创建（单插件发布通常指向已有 release）
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 || \
+            gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --repo "$GITHUB_REPOSITORY"
+          # 指定插件时只上传该插件 zip（--clobber 覆盖同名资产）+ 回传最新 repo.json
+          if [ -n "$RELEASE_PLUGIN" ]; then
+            gh release upload "$RELEASE_TAG" "package/$RELEASE_PLUGIN/"com.swallownote.*.zip package/repo.json --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release upload "$RELEASE_TAG" package/*/com.swallownote.*.zip package/repo.json --clobber --repo "$GITHUB_REPOSITORY"
+          fi
+          echo "已上传资产到 release $RELEASE_TAG"

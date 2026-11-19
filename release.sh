@@ -11,6 +11,8 @@ set -e
 #   4. 清除 Actions             — 失败运行 / 全部运行
 #   5. 删除 Tag                 — 指定 / 全部
 #   6. 重新触发最新版本 Actions — 删除远程 tag 后重推
+#   7. 推送 beta 内容到远程 main 分支
+#   8. 发布指定插件            — 触发 CI 单插件构建发布 / 单独更新 repo.json
 #   0. 退出
 #
 # 签名: 读取 SWALLOWNOTE_PLUGIN_SIGNING_KEY 环境变量（CI 同源），或 package/.signing-key
@@ -679,6 +681,180 @@ rerun_latest_action() {
     echo_info "查看构建进度: https://github.com/$REPO_SLUG/actions"
 }
 
+# 发布指定插件（子菜单：CI 单插件构建发布 / 单独更新 repo.json）
+#
+# 场景 1（CI 发布）：单插件迭代后不想全量重发——触发 plugin-release.yml 的
+#   workflow_dispatch，三平台只构建该插件，只上传该插件 zip + repo.json。
+#   构建基于 --ref 指定的分支（默认当前分支），发布到指定 tag 的 release。
+# 场景 2（仅 repo.json）：本地手动改了 repo.json（描述/权限/平台声明等），
+#   不重打 zip，直接覆盖最新 release 上的 repo.json 资产。
+publish_single_plugin() {
+    echo ""
+    echo "=== 发布指定插件 ==="
+    echo ""
+    echo "  1. 触发 CI 构建发布指定插件（三平台构建 + 签名 + 上传 release）"
+    echo "  2. 单独更新 repo.json 到最新 Release（不重新打包）"
+    echo "  0. 返回"
+    echo ""
+    read -p "请选择: " sub_choice
+
+    case $sub_choice in
+        1)
+            dispatch_single_plugin_ci
+            ;;
+        2)
+            update_repo_json_only
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo_error "无效选择"
+            ;;
+    esac
+}
+
+# 检查 gh CLI 可用性（未安装/未登录直接报错退出）
+require_gh() {
+    if ! command -v gh &> /dev/null; then
+        echo_error "需要安装 GitHub CLI"
+        echo "安装命令: brew install gh"
+        exit 1
+    fi
+    if ! gh auth status &> /dev/null; then
+        echo_error "未登录 GitHub"
+        echo "请运行: gh auth login"
+        exit 1
+    fi
+}
+
+# 交互式选择插件（复用本地打包的编号选择逻辑；返回全局数组 SELECTED_PLUGINS）
+select_plugins() {
+    echo_info "可用插件:"
+    available=()
+    while IFS= read -r p; do
+        available+=("$p")
+        echo "  $((${#available[@]})). $p"
+    done < <(list_plugins)
+
+    if [ ${#available[@]} -eq 0 ]; then
+        echo_error "package/ 下没有可用插件"
+        return 1
+    fi
+
+    echo ""
+    read -p "输入插件编号（逗号分隔，回车=全部）: " choice
+
+    SELECTED_PLUGINS=()
+    if [ -z "$choice" ]; then
+        SELECTED_PLUGINS=("${available[@]}")
+    else
+        IFS=',' read -ra idx <<< "$choice"
+        for i in "${idx[@]}"; do
+            SELECTED_PLUGINS+=("${available[$((i-1))]}")
+        done
+    fi
+}
+
+# 场景 1: 触发 CI workflow_dispatch 单插件构建发布
+dispatch_single_plugin_ci() {
+    require_gh
+
+    remote_name=$(git remote 2>/dev/null | head -1)
+    if [ -z "$remote_name" ]; then
+        echo_error "未找到远程仓库"
+        return 1
+    fi
+    echo_info "检测到远程仓库: $remote_name"
+
+    # 选择插件（CI dispatch 一次只传一个插件，多选则逐个触发）
+    select_plugins || return 1
+
+    # 发布目标 tag（release 资产挂载点）：默认最新 plugin-v* tag
+    default_tag=$(get_current_version)
+    if [ -n "$default_tag" ]; then
+        echo_info "当前最新版本 tag: $default_tag"
+    fi
+    echo ""
+    read -p "输入发布目标 tag (留空=${default_tag:-无，将自动创建}): " target_tag
+    if [ -z "$target_tag" ]; then
+        if [ -z "$default_tag" ]; then
+            echo_error "仓库还没有 plugin-v* tag，请先通过菜单 2 发布首个版本"
+            return 1
+        fi
+        target_tag="$default_tag"
+    fi
+
+    # 构建代码源分支：默认当前分支（插件最新代码），可指定
+    current_branch=$(git branch --show-current)
+    echo ""
+    read -p "输入构建分支 (留空=当前分支 $current_branch): " build_ref
+    build_ref="${build_ref:-$current_branch}"
+
+    echo ""
+    echo_warning "即将触发 CI: 插件 [${SELECTED_PLUGINS[*]}] ← 分支 $build_ref → 发布到 $target_tag"
+    read -p "确认执行? (y/n): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo_info "已取消"
+        return
+    fi
+
+    for plugin in "${SELECTED_PLUGINS[@]}"; do
+        echo_info "触发 workflow_dispatch: plugin=$plugin tag=$target_tag ref=$build_ref"
+        if ! gh workflow run plugin-release.yml --repo "$REPO_SLUG" --ref "$build_ref" \
+            -f plugin="$plugin" -f tag="$target_tag"; then
+            echo_error "触发失败: $plugin（检查分支 $build_ref 是否存在且包含 plugin-release.yml）"
+            return 1
+        fi
+    done
+
+    echo_success "已触发 CI 单插件发布!"
+    echo_info "查看构建进度: https://github.com/$REPO_SLUG/actions"
+}
+
+# 场景 2: 单独更新 repo.json 到最新 release（不重新打包）
+update_repo_json_only() {
+    require_gh
+
+    if [ ! -f "$REPO_ROOT/package/repo.json" ]; then
+        echo_error "未找到 package/repo.json"
+        return 1
+    fi
+
+    # 目标 tag：默认最新 plugin-v* tag
+    default_tag=$(get_current_version)
+    if [ -n "$default_tag" ]; then
+        echo_info "当前最新版本 tag: $default_tag"
+    fi
+    echo ""
+    read -p "输入目标 tag (留空=${default_tag:-无}): " target_tag
+    target_tag="${target_tag:-$default_tag}"
+    if [ -z "$target_tag" ]; then
+        echo_error "仓库还没有 plugin-v* tag，请先通过菜单 2 发布首个版本"
+        return 1
+    fi
+
+    # repo.json 是市场索引权威源：展示变更摘要再确认
+    echo ""
+    echo_info "即将上传的 repo.json（前 30 行）:"
+    head -30 "$REPO_ROOT/package/repo.json"
+    echo ""
+    echo_warning "将覆盖 release $target_tag 上的 repo.json 资产（市场源 URL 不变）"
+    read -p "确认上传? (y/n): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        echo_info "已取消"
+        return
+    fi
+
+    if gh release upload "$target_tag" "$REPO_ROOT/package/repo.json" --clobber --repo "$REPO_SLUG"; then
+        echo_success "repo.json 已更新到 release $target_tag!"
+        echo_info "市场源地址: https://github.com/$REPO_SLUG/releases/latest/download/repo.json"
+    else
+        echo_error "上传失败（检查 release $target_tag 是否存在）"
+        return 1
+    fi
+}
+
 # 将本地 beta 分支远程推送到 main（全程不检出 main，本地只保留 beta 分支）
 #
 # 合并策略（按序判定）:
@@ -787,6 +963,7 @@ show_menu() {
     echo "║  5. 删除 Tag                                    ║"
     echo "║  6. 重新触发最新版本 GitHub Actions              ║"
     echo "║  7. 推送 beta 内容到远程 main 分支               ║"
+    echo "║  8. 发布指定插件 (CI 单插件发布/更新 repo.json)  ║"
     echo "║  0. 退出                                        ║"
     echo "╚══════════════════════════════════════════════════╝"
     echo ""
@@ -798,7 +975,7 @@ main() {
 
     while true; do
         show_menu
-        read -p "请选择操作 (0-7): " choice
+        read -p "请选择操作 (0-8): " choice
 
         case $choice in
             1)
@@ -822,12 +999,15 @@ main() {
             7)
                 merge_beta_to_main
                 ;;
+            8)
+                publish_single_plugin
+                ;;
             0)
                 echo_info "再见!"
                 exit 0
                 ;;
             *)
-                echo_error "无效选择，请输入 0-7"
+                echo_error "无效选择，请输入 0-8"
                 ;;
         esac
 
