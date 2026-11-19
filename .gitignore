@@ -20,3 +20,4 @@ backend/
 .work/
 .claude/
 ai-notes/
+package/.signing-key

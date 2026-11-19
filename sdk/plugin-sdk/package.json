@@ -23,6 +23,7 @@
     "dev": "tsc -p tsconfig.json --watch"
   },
   "devDependencies": {
+    "@types/react": "^19.2.15",
     "typescript": "^5.0.0"
   },
   "peerDependencies": {
