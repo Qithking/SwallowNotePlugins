@@ -27,6 +27,53 @@ function nowIsoZ(): string {
   return new Date().toISOString().replace(/\.\d{3}Z$/, 'Z')
 }
 
+/** 后端二进制合法名前缀：本地构建用带点 id（plugin_com.x.y），CI 产物用 Cargo 下划线名（plugin_com_x_y） */
+function backendNamePrefixes(project: PluginProject): string[] {
+  return [...new Set([`plugin_${project.pluginId}`, project.binName])]
+}
+
+/** 是否为本插件的后端可执行文件（排除 .d 等编译附带文件） */
+function isBackendBinary(project: PluginProject, name: string): boolean {
+  if (name.endsWith('.d')) return false
+  return backendNamePrefixes(project).some((p) => name === p || name.startsWith(`${p}.`))
+}
+
+export interface BackendFile {
+  /** zip 内相对路径（backend/ 之后的部分） */
+  rel: string
+  /** 磁盘路径 */
+  abs: string
+}
+
+/**
+ * 收集需要进 zip 的后端文件，覆盖两种来源：
+ *  - dist/backend/：package 命令现构建的当前平台二进制（根文件）及其下的平台子目录；
+ *  - <pluginDir>/backend/<平台>/：CI 三平台产物（放在 dist 外，避免被 vite build 清空）。
+ * 插件根 backend/ 的根文件属于 dev 构建副本，不收集，避免与 dist 内文件重复入包。
+ */
+export function collectBackendFiles(project: PluginProject): BackendFile[] {
+  const found = new Map<string, string>()
+  const scan = (dir: string, allowRootFile: boolean): void => {
+    if (!existsSync(dir)) return
+    for (const entry of readdirSync(dir)) {
+      const full = join(dir, entry)
+      if (!statSync(full).isDirectory()) {
+        if (allowRootFile && isBackendBinary(project, entry)) found.set(entry, full)
+        continue
+      }
+      for (const f of readdirSync(full)) {
+        if (isBackendBinary(project, f)) found.set(`${entry}/${f}`, join(full, f))
+      }
+    }
+  }
+  scan(join(project.dir, 'dist', 'backend'), true)
+  scan(join(project.dir, 'backend'), false)
+  // 排序保证 zip 字节确定（readdir 顺序依赖文件系统）
+  return [...found.entries()]
+    .map(([rel, abs]) => ({ rel, abs }))
+    .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+}
+
 /**
  * swallow-plugin package —— 等价平移各插件 package.sh 全流程：
  *   版本 bump（manifest.json / package.json / Cargo.toml）
@@ -108,35 +155,18 @@ export function cmdPackage(pluginDir: string, opts: PackageOptions): void {
     zipEntries.push({ name: 'settings.json', data: readFileSync(join(distDir, 'settings.json')), mode: 0o644 })
   }
   if (project.hasBackend) {
-    // backend/ 目录条目 + 二进制条目；收集全部布局：根（本地构建）+ 平台子目录
-    // （CI 多平台产物 backend/<平台>/plugin_<id>），与宿主 host_platform_dir →
-    // 根兜底的解析顺序一致，保证 zip 内含全部平台二进制
+    // backend/ 目录条目 + 二进制条目；来源：dist/backend（当前平台）+ 插件根 backend/<平台>（CI 多平台）
     zipEntries.push({ name: 'backend/', data: null, mode: 0o755 })
-    const backendDir = join(distDir, 'backend')
-    const backendRels: string[] = []
-    if (existsSync(backendDir)) {
-      for (const entry of readdirSync(backendDir)) {
-        if (entry === `plugin_${project.pluginId}`) {
-          backendRels.push(entry)
-          continue
-        }
-        const sub = join(backendDir, entry)
-        if (statSync(sub).isDirectory()) {
-          for (const f of readdirSync(sub)) {
-            if (f.startsWith(`plugin_${project.pluginId}`)) {
-              backendRels.push(`${entry}/${f}`)
-            }
-          }
-        }
-      }
+    const backendFiles = collectBackendFiles(project)
+    if (backendFiles.length === 0) {
+      throw new Error(
+        `backend 二进制缺失: ${join(distDir, 'backend')}/ 与 ${join(pluginDir, 'backend')}/<平台>/ 下均未找到 plugin_${project.pluginId}`,
+      )
     }
-    if (backendRels.length === 0) {
-      throw new Error(`backend 二进制缺失: ${backendDir}/plugin_${project.pluginId}`)
-    }
-    for (const rel of backendRels) {
+    for (const f of backendFiles) {
       zipEntries.push({
-        name: `backend/${rel}`,
-        data: readFileSync(join(backendDir, rel)),
+        name: `backend/${f.rel}`,
+        data: readFileSync(f.abs),
         mode: 0o755,
       })
     }

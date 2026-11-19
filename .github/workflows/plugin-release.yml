@@ -36,9 +36,11 @@ jobs:
             echo "==> backend: $p"
             (cd "$p/src-tauri" && cargo build --release --target aarch64-apple-darwin)
             (cd "$p/src-tauri" && cargo build --release --target x86_64-apple-darwin)
-            mkdir -p "$p/dist/backend/darwin-aarch64" "$p/dist/backend/darwin-x86_64"
-            cp "$p"/src-tauri/target/aarch64-apple-darwin/release/plugin_* "$p/dist/backend/darwin-aarch64/"
-            cp "$p"/src-tauri/target/x86_64-apple-darwin/release/plugin_* "$p/dist/backend/darwin-x86_64/"
+            # 落到插件根 backend/<平台>/：package 阶段的 vite build 会清空 dist/，
+            # 多平台产物必须放在 dist 之外，打包时再由 plugin-kit 合并收集
+            mkdir -p "$p/backend/darwin-aarch64" "$p/backend/darwin-x86_64"
+            cp "$p"/src-tauri/target/aarch64-apple-darwin/release/plugin_* "$p/backend/darwin-aarch64/"
+            cp "$p"/src-tauri/target/x86_64-apple-darwin/release/plugin_* "$p/backend/darwin-x86_64/"
           done
 
       # windows-latest 自带的 Git Bash Perl 缺 Locale::Maketext::Simple，
@@ -66,8 +68,8 @@ jobs:
             [ -d "$p/src-tauri" ] || continue
             echo "==> backend: $p"
             (cd "$p/src-tauri" && cargo build --release)
-            mkdir -p "$p/dist/backend/windows-x86_64"
-            cp "$p"/src-tauri/target/release/plugin_*.exe "$p/dist/backend/windows-x86_64/"
+            mkdir -p "$p/backend/windows-x86_64"
+            cp "$p"/src-tauri/target/release/plugin_*.exe "$p/backend/windows-x86_64/"
           done
 
       - name: Build Plugin Backends (Linux)
@@ -78,17 +80,17 @@ jobs:
             [ -d "$p/src-tauri" ] || continue
             echo "==> backend: $p"
             (cd "$p/src-tauri" && cargo build --release)
-            mkdir -p "$p/dist/backend/linux-x86_64"
-            cp "$p"/src-tauri/target/release/plugin_* "$p/dist/backend/linux-x86_64/"
+            mkdir -p "$p/backend/linux-x86_64"
+            cp "$p"/src-tauri/target/release/plugin_* "$p/backend/linux-x86_64/"
           done
 
       - name: Upload Plugin Backend Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: plugin-backends-${{ matrix.platform }}
-          path: package/*/dist/backend/**
+          path: package/*/backend/**
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: error
 
   release:
     name: package & publish
@@ -106,7 +108,7 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
-      # 合并三平台后端产物回 package/*/dist/backend
+      # 合并三平台后端产物回插件根 backend/<平台>/（artifact 内部为 <插件>/backend/<平台>/）
       - name: Download Backend Artifacts
         uses: actions/download-artifact@v4
         with:
@@ -115,10 +117,14 @@ jobs:
 
       - name: Merge Artifacts Into Layout
         run: |
+          set -o pipefail
           for dir in merged-backends/*/; do
-            cp -R "$dir." .
+            cp -R "$dir." package/
           done
-          find package/*/dist/backend -type f | sort
+          # 显式断言：合并后必须存在平台子目录下的后端二进制，避免空产物静默通过
+          files=$(find package -type f -path '*/backend/*/plugin_*')
+          [ -n "$files" ] || { echo "::error::后端产物合并为空，请检查 artifact 内部目录结构"; exit 1; }
+          echo "$files" | sort
 
       # 构建 plugin-kit（tsc），供后续 package 命令使用
       - name: Build plugin-kit
