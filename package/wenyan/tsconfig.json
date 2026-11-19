@@ -12,11 +12,7 @@
     "noEmit": true,
     "baseUrl": ".",
     "paths": {
-      "@/lib/*": ["../../src/lib/*"],
-      "@/components/CodeEditor": ["../../src/components/CodeEditor/index.ts"],
-      "@/components/CodeEditor/*": ["../../src/components/CodeEditor/*"],
-      "@/components/Plugin/useDebounce": ["../../src/components/Plugin/useDebounce.ts"],
-      "@/components/ui/*": ["../../src/components/ui/*"]
+      "@/*": ["./src/*"]
     }
   },
   "include": ["src"]

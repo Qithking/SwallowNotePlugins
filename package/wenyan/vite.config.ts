@@ -1,8 +1,8 @@
 import { resolve } from 'node:path'
 import { definePluginViteConfig } from '@swallow-note/plugin-kit'
 
-// 允许插件通过 @ 别名引用主项目源码（shadcn/ui 组件等）
-const SRC_ALIAS = { '@': resolve(__dirname, '../../src') }
+// 插件为独立仓库，@ 别名指向插件自身 src（vendored shadcn/ui 与工具模块）
+const SRC_ALIAS = { '@': resolve(__dirname, 'src') }
 
 // @/ 引入的 CodeEditor 依赖 codemirror 系模块，宿主 loader 不共享这些模块，
 // 必须从 kit 默认 external 中排除、打进 bundle（行为与旧内联配置一致）
