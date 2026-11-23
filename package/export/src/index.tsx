@@ -1,65 +1,77 @@
 /**
- * Export Plugin — External plugin entry
+ * Export Plugin — 薄壳入口（宿主原语路线）
  *
- * Exports the current Markdown document to Word (.docx) or PDF.
- * - DOCX: Uses the plugin backend (JSON-RPC subprocess) with pulldown-cmark
- *   to parse markdown and docx-rs to generate the DOCX file.
- * - PDF: Uses the backend to convert markdown to styled HTML, then renders
- *   the HTML in a hidden iframe and captures it with html2canvas + jsPDF.
+ * 导出转换能力已内置宿主主程序（commands/export 模块）：DOCX/HTML 转换、
+ * 图片读取、mermaid/katex/markmap 渲染、下载目录写入均在宿主命令中完成。
+ * 本插件只保留 UI（工具栏下拉菜单 / toast / 导出锁），全部转换经
+ * Tauri IPC 调用宿主命令，主题与渲染资源经 `window.__snExportBridge`
+ * 调用宿主挂载的采集函数。
  *
- * This plugin is completely self-contained:
- * - Frontend: toolbarButton component with dropdown menu
- * - Backend: Rust binary in src-tauri/ (JSON-RPC over stdin/stdout)
- * - No code in the host application is specific to this plugin
+ * 依赖的宿主命令（需宿主 ≥ 本次发版版本）：
+ * - export_docx / export_html / generate_export_html / open_print_preview
+ *
+ * 宿主桥（main.tsx 挂载）：
+ * - collectExportTheme()：采集当前主题导出值
+ * - renderCustomBlocks(markdown, target)：渲染自定义代码块
+ * - getWorkspaceRoot(notePath)：解析笔记所属工作区根
  */
 /* eslint-disable react-refresh/only-export-components */
 import { useState, useRef, useEffect, useCallback, type ReactNode } from 'react'
 import type { PluginPanelProps, ToolbarButtonProps } from '@swallow-note/plugin-sdk'
-import { definePlugin, PluginError } from '@swallow-note/plugin-sdk'
+import { definePlugin } from '@swallow-note/plugin-sdk'
 // 导出 setHost 供宿主运行时安装 SDK overrides
 export { setHost } from '@swallow-note/plugin-sdk'
 import manifestJson from '../manifest.json'
-import { save } from '@tauri-apps/plugin-dialog'
 import { invoke } from '@tauri-apps/api/core'
-import { convertFileSrc } from '@tauri-apps/api/core'
 import { toast } from 'sonner'
-import { jsPDF } from 'jspdf'
-import { domToCanvas } from 'modern-screenshot'
 import { compactMarkdown } from './markdown-normalize'
 import { getStrings } from './i18n'
 
-// ─── 常量 ───
+// ─── 宿主桥类型 ───
 
-/// A4 页宽（96 dpi 下的 CSS 像素）
-const A4_WIDTH_PX = 794
-/// A4 页高（96 dpi，297mm）
-const A4_HEIGHT_PX = 1123
+/** 与宿主 Rust ExportTheme 同形（camelCase，数值 px） */
+interface ExportTheme {
+  bodyFont: string
+  bodySize: number
+  lineHeight: number
+  h1Size: number
+  h2Size: number
+  h3Size: number
+  h4Size: number
+  h5Size: number
+  textColor: string
+  linkColor: string
+  borderColor: string
+  codeFont: string
+  codeSize: number
+  codeBg: string
+  quoteColor: string
+  tableHeaderBg: string
+}
 
-/**
- * JSON-RPC application error codes emitted by the backend.
- * Mirrors the `ERR_*` constants in `src-tauri/src/convert.rs` so
- * the frontend can branch on the code (not the message string)
- * when categorising failures. Transport-level codes (-32700
- * parse, -32601 method-not-found) come from the host's Rust
- * layer and never reach this code path; we only list the
- * application codes here.
- */
-const ERR_MARKDOWN_TOO_LARGE = 1001
-// 仅 ERR_MARKDOWN_TOO_LARGE 有分支处理，其余错误码回退默认 toast
+/** 宿主 main.tsx 挂载的导出桥 */
+interface SnExportBridge {
+  collectExportTheme(): ExportTheme
+  renderCustomBlocks(markdown: string, target: 'docx' | 'html'): Promise<Record<string, string>>
+  getWorkspaceRoot(notePath: string): string | null
+}
+
+/** 宿主导出命令返回的落盘结果 */
+interface HostExportResult {
+  path: string
+}
+
+function getExportBridge(): SnExportBridge | null {
+  const bridge = (window as unknown as { __snExportBridge?: SnExportBridge }).__snExportBridge
+  return bridge && typeof bridge.collectExportTheme === 'function' ? bridge : null
+}
 
 /**
  * Read the user's current locale without depending on
  * `react-i18next`. We prefer the host's globally-injected locale
  * (`window.__SWALLOW_LOCALE__`) when present so we follow the
  * host's language switch in real time; otherwise we fall back to
- * the browser's `navigator.language` and finally to `zh-CN` (the
- * host's primary user base).
- *
- * Subscribing to host locale-change events would require a
- * `useSyncExternalStore` plus an event-bus listener; the current
- * usage only reads the locale at render time and a parent
- * re-render will pick up changes, so we keep this implementation
- * dependency-free.
+ * the browser's `navigator.language` and finally to `zh-CN`.
  */
 function readLocale(): string {
   const w = (typeof window !== 'undefined' ? (window as unknown as { __SWALLOW_LOCALE__?: string }) : undefined)
@@ -93,796 +105,33 @@ function ExportIcon({ size = 18 }: { size?: number }): ReactNode {
   )
 }
 
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-/**
- * Encode a UTF-8 string to a base64 string.
- *
- * Uses `btoa` with chunked `String.fromCharCode` to avoid stack
- * overflow on large strings. The chunk size of 8192 is well within
- * the call stack limit (~65K on most engines) and keeps memory
- * usage bounded — a 1 MB string produces ~122 chunks.
- *
- * This is the **primary** encoder for text content (HTML export).
- * We intentionally avoid `FileReader.readAsDataURL` here because
- * its behaviour in Tauri 2.0's WKWebView is unreliable — in some
- * cases it returns the data URL with the `data:…;base64,` prefix
- * still attached, causing the Rust backend's base64 decoder to
- * reject the input with "Invalid symbol" errors.
- */
-function strToBase64(str: string): string {
-  const bytes = new TextEncoder().encode(str)
-  let binary = ''
-  const chunkSize = 8192
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize)
-    binary += String.fromCharCode.apply(null, chunk as unknown as number[])
-  }
-  return btoa(binary)
-}
-
-/**
- * Encode a `Uint8Array` to a base64 string.
- *
- * Uses `btoa` with chunked `String.fromCharCode` — the same strategy
- * as `strToBase64` but operates on raw bytes. This is used for PDF
- * export where the data is already a `Uint8Array`.
- *
- * The previous implementation used `FileReader.readAsDataURL` to
- * avoid stack overflow on multi-megabyte buffers, but it was
- * unreliable in Tauri's WebView. The chunked approach below is
- * synchronous, deterministic, and handles multi-MB buffers without
- * stack issues (chunk size 8192 keeps each `apply` call well within
- * the ~65K frame limit).
- */
-function uint8ToBase64(bytes: Uint8Array): string {
-  let binary = ''
-  const chunkSize = 8192
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const chunk = bytes.subarray(i, i + chunkSize)
-    binary += String.fromCharCode.apply(null, chunk as unknown as number[])
-  }
-  return btoa(binary)
-}
-
-/// Maximum total size of all embedded images, in bytes. We
-/// pre-cap before reading each one so a 100 MB image doesn't
-/// OOM the webview on its own. The 50 MB budget is roughly
-/// 100 images at 500 KB each — enough for the long documents
-/// we already support (the markdown size limit is 5 MB) while
-/// leaving headroom for the rest of the export pipeline.
-const MAX_EMBEDDED_IMAGE_BYTES = 50 * 1024 * 1024
-
-/**
- * Collect every image referenced by the markdown and read the
- * bytes so the DOCX backend can embed them as real drawings.
- *
- * Strategy:
- *  1. Regex-extract every `![alt](url)` URL.
- *  2. Skip http(s) / data: / asset: URLs (they go through
- *     Tauri's protocol handler at render time and the backend
- *     can't embed remote bytes anyway).
- *  3. For each remaining relative path, resolve against
- *     `notePath`, route through `convertFileSrc` so the host's
- *     asset protocol reads the file, fetch the bytes, and
- *     base64-encode them.
- *  4. Stop adding to the output once the running total
- *     exceeds [`MAX_EMBEDDED_IMAGE_BYTES`]; the per-image
- *     error path is `try/catch` so a single broken image
- *     doesn't fail the whole export.
- *
- * Returns a `url → base64-no-prefix` map keyed by the
- * original markdown URL (NOT the absolute filesystem path)
- * so the backend can look up by the URL it sees in
- * `Inline::Image { url }`.
- */
-async function collectImageAssets(
-  markdown: string,
-  notePath: string,
-): Promise<Record<string, string>> {
-  const re = /!\[[^\]]*\]\(([^)\s]+)(?:\s+"[^"]*")?\)/g
-  const urls = new Set<string>()
-  let m: RegExpExecArray | null
-  while ((m = re.exec(markdown)) !== null) {
-    const url = m[1]
-    if (!url) continue
-    // Skip absolute / pre-resolved URLs.
-    if (/^(https?|data|blob|asset):/i.test(url)) continue
-    urls.add(url)
-  }
-  if (urls.size === 0) return {}
-
-  const out: Record<string, string> = {}
-  let totalBytes = 0
-  for (const url of urls) {
-    if (totalBytes >= MAX_EMBEDDED_IMAGE_BYTES) {
-      // Budget exhausted; stop adding more images. The user
-      // can still get the rest of the document and the
-      // skipped images fall back to the `[图片]` placeholder.
-      break
-    }
-    try {
-      const abs = resolveRelativePath(notePath, url)
-      const assetUrl = convertFileSrc(abs)
-      const resp = await fetch(assetUrl)
-      if (!resp.ok) continue
-      const blob = await resp.blob()
-      if (totalBytes + blob.size > MAX_EMBEDDED_IMAGE_BYTES) continue
-      const buf = await blob.arrayBuffer()
-      const bytes = new Uint8Array(buf)
-      out[url] = uint8ToBase64(bytes)
-      totalBytes += bytes.byteLength
-    } catch (e) {
-      // Single-image failures are non-fatal; the rest of the
-      // document still exports. We log a warning so the host
-      // console can surface the cause if the user reports a
-      // problem.
-      console.warn('[export] collectImageAssets: skip', url, e)
-    }
-  }
-  return out
-}
-
-/**
- * Resolve a relative path against a base path. The base is the
- * absolute filesystem path of the active note; the result is the
- * absolute path of the referenced image. Mirrors the semantics of
- * `path.resolve(baseDir, relative)` from Node, but in a form that
- * works in the Tauri webview.
- */
-function resolveRelativePath(baseFile: string, relative: string): string {
-  if (relative.startsWith('/')) return relative
-  const lastSlash = baseFile.lastIndexOf('/')
-  const baseDir = lastSlash >= 0 ? baseFile.slice(0, lastSlash) : ''
-  if (baseDir === '') return relative
-  // Normalise `..` segments by walking the joined path. We do not
-  // need full path normalisation for the typical note-+-image
-  // case, but the loop handles the common nested case.
-  const segments = (baseDir + '/' + relative).split('/')
-  const out: string[] = []
-  for (const seg of segments) {
-    if (seg === '' || seg === '.') continue
-    if (seg === '..') {
-      out.pop()
-      continue
-    }
-    out.push(seg)
-  }
-  return '/' + out.join('/')
-}
-
-/**
- * Wait for every `<img>` in the container to either load or error.
- * Uses a **single shared deadline** (8s by default) so a document
- * with N broken remote images still completes in ~8s total — the
- * older per-image 5s timeout scaled linearly with image count in
- * the worst case and was wasteful when the page is otherwise
- * ready.
- */
-async function waitForImages(root: HTMLElement, deadlineMs = 8000): Promise<void> {
-  const images = Array.from(root.querySelectorAll('img'))
-  if (images.length === 0) return
-  const started = Date.now()
-  await Promise.all(
-    images.map(
-      (img) =>
-        new Promise<void>((resolve) => {
-          if (img.complete) {
-            resolve()
-            return
-          }
-          const done = () => {
-            img.removeEventListener('load', done)
-            img.removeEventListener('error', done)
-            resolve()
-          }
-          img.addEventListener('load', done, { once: true })
-          img.addEventListener('error', done, { once: true })
-          // Clamp the per-image timeout to whatever's left of the
-          // shared deadline so the total wait is bounded.
-          const remaining = Math.max(0, deadlineMs - (Date.now() - started))
-          setTimeout(done, remaining)
-        }),
-    ),
-  )
-}
-
-/**
- * Rewrite `<img src="…">` references to Tauri's `asset:` protocol
- * so the hidden rendering container can actually load them. We
- * only rewrite relative URLs; absolute `http(s):` and inline
- * `data:` URLs pass through untouched.
- */
-function resolveImageSources(root: HTMLElement, notePath: string): void {
-  const noteDir = notePath
-  if (!noteDir) return
-  for (const img of Array.from(root.querySelectorAll('img'))) {
-    const src = img.getAttribute('src')
-    if (!src) continue
-    if (
-      src.startsWith('http:') ||
-      src.startsWith('https:') ||
-      src.startsWith('data:') ||
-      src.startsWith('asset:') ||
-      src.startsWith('blob:')
-    ) {
-      continue
-    }
-    const abs = resolveRelativePath(noteDir, src)
-    try {
-      img.setAttribute('src', convertFileSrc(abs))
-    } catch {
-      // convertFileSrc only throws for malformed paths; fall back
-      // to the original src so the export still completes.
-    }
-  }
-}
-
-// ─── PDF generation helper ───────────────────────────────────────────────────
-
-/**
- * Split a single child element that is taller than one page into
- * multiple page-sized chunks. The caller (the page-grouping
- * algorithm) only invokes this on elements whose height exceeds
- * `maxHeight`, so we know we need at least one split.
- *
- * Supported element types:
- *  - `<pre>` — split by text lines. This is by far the most common
- *    oversized block (a long fenced code block) so we implement
- *    it explicitly. The per-line height is the CSS line-height
- *    applied by the page's `<style>` (font-size 12 × line-height
- *    1.6 ≈ 19.2px); we use that to decide how many lines fit on a
- *    page.
- *  - everything else — fall back to a single-chunk "best effort"
- *    output that the page's `overflow: hidden` will clip. Better
- *    than silently dropping the tail.
- */
-function splitOversizedChild(
-  child: HTMLElement,
-  maxHeight: number,
-): HTMLElement[] {
-  if (child.tagName === 'PRE') {
-    // Approximate per-line height. The rendered line-height in
-    // the page stylesheet is `font-size: 12px; line-height: 1.6`
-    // which gives ~19.2 px per line. We pad the budget slightly
-    // for the wrapper padding/border.
-    const lineHeight = 19.2
-    const linesPerPage = Math.max(1, Math.floor(maxHeight / lineHeight))
-    const sourceText = child.textContent ?? ''
-    const allLines = sourceText.split('\n')
-    if (allLines.length <= linesPerPage) {
-      return [child]
-    }
-    const out: HTMLElement[] = []
-    for (let i = 0; i < allLines.length; i += linesPerPage) {
-      const chunk = allLines.slice(i, i + linesPerPage)
-      const part = child.cloneNode(false) as HTMLElement
-      // Preserve the original tag (PRE) and CSS classes so the
-      // page stylesheet still applies; replace the text content
-      // with the slice's lines. We don't preserve inner <code>
-      // wrapping (the host template flattens to a text node) but
-      // a single <pre> child is enough for the visual treatment.
-      part.textContent = chunk.join('\n')
-      out.push(part)
-    }
-    return out
-  }
-  // Unknown oversized child: return as-is. The page-level
-  // `overflow: hidden` will clip the tail. Documented as a known
-  // limitation in the README; an editor user can split it
-  // manually.
-  return [child]
-}
-
-/**
- * Languages that have a client-side renderer we want to swap into
- * the hidden container before screenshotting. We only post-process
- * the three most common ones; anything else is left as the
- * raw `<pre>` produced by `markdown_to_html`. The list is the
- * contract with the backend's `convert.rs::render_code_block`
- * marker, which appends `"(前端渲染)"` to the same language tags
- * in the DOCX so the reader knows the PDF / HTML pipeline
- * produces a rendered figure.
- */
-const CUSTOM_BLOCK_LANGS = ['mermaid', 'katex', 'markmap'] as const
-
-/**
- * 渲染 mermaid/katex/markmap 代码块为 PNG 图片，
- * 返回 `{ assetKey: base64_png_no_prefix }` 映射。
- * assetKey 格式：`__{lang}_{index}__`，与后端 convert.rs 一致。
- *
- * 扫描 markdown 中所有前端渲染类代码块，按出现顺序分配序号，
- * 使用对应的渲染库（mermaid.js / KaTeX / markmap-view）渲染后
- * 通过 `domToCanvas` 截取为 PNG 图片。
- */
-async function renderCustomBlocksForDocx(
-  markdown: string,
-): Promise<Record<string, string>> {
-  // 扫描所有前端渲染类代码块，记录语言和序号
-  const blockPattern = /```(mermaid|katex|markmap)\n([\s\S]*?)```/g
-  const blocks: { lang: string; index: number; source: string }[] = []
-  let match: RegExpExecArray | null
-  let idx = 0
-  while ((match = blockPattern.exec(markdown)) !== null) {
-    blocks.push({ lang: match[1], index: idx, source: match[2] })
-    idx++
-  }
-  if (blocks.length === 0) return {}
-
-  // 动态 import 渲染库
-  const [mermaid, katex, markmap] = await Promise.all([
-    import('mermaid' as any).catch(() => null),
-    import('katex' as any).catch(() => null),
-    import('markmap-view' as any).catch(() => null),
-  ])
-
-  // mermaid 需要初始化
-  if (mermaid) {
-    try {
-      mermaid.default.initialize({ startOnLoad: false, securityLevel: 'loose' })
-    } catch { /* 忽略重复初始化错误 */ }
-  }
-
-  // 逐块渲染 → Canvas → PNG
-  const result: Record<string, string> = {}
-  for (const block of blocks) {
-    try {
-      const pngBase64 = await renderBlockToPng(block, mermaid, katex, markmap)
-      if (pngBase64) {
-        result[`__${block.lang}_${block.index}__`] = pngBase64
-      }
-    } catch (e) {
-      console.warn(`[export] render ${block.lang} block ${block.index} failed`, e)
-    }
-  }
-  return result
-}
-
-/**
- * 将单个代码块渲染为 PNG base64（无 data: 前缀）。
- * 在屏幕外创建临时 DOM 容器，渲染后通过 domToCanvas 截取。
- */
-async function renderBlockToPng(
-  block: { lang: string; index: number; source: string },
-  mermaid: any, katex: any, markmap: any,
-): Promise<string | null> {
-  const container = document.createElement('div')
-  container.style.cssText = 'position:fixed;left:0;top:0;transform:translateX(-200vw);background:#fff;padding:16px;z-index:-1;pointer-events:none;'
-  document.body.appendChild(container)
-
-  try {
-    if (block.lang === 'mermaid' && mermaid) {
-      const id = `mermaid-docx-${block.index}-${Math.random().toString(36).slice(2, 6)}`
-      const { svg } = await mermaid.default.render(id, block.source)
-      container.innerHTML = svg
-    } else if (block.lang === 'katex' && katex) {
-      const html = katex.default.renderToString(block.source, {
-        displayMode: true,
-        throwOnError: false,
-      })
-      container.innerHTML = html
-      // KaTeX 渲染需要字体加载，短暂等待
-      await new Promise((r) => setTimeout(r, 100))
-    } else if (block.lang === 'markmap' && markmap) {
-      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-      svg.style.width = '720px'
-      svg.style.height = '400px'
-      const mm = markmap.Markmap.create(svg, undefined, block.source)
-      await mm.fit()
-      await new Promise((r) => setTimeout(r, 200))
-      container.appendChild(svg)
-    } else {
-      return null
-    }
-
-    // DOM → Canvas → PNG
-    const canvas = await domToCanvas(container, {
-      scale: 2,
-      backgroundColor: '#ffffff',
-    })
-    const blob = await new Promise<Blob>((resolve) => {
-      canvas.toBlob((b) => resolve(b!), 'image/png')
-    })
-    const buf = await blob.arrayBuffer()
-    return uint8ToBase64(new Uint8Array(buf))
-  } finally {
-    document.body.removeChild(container)
-  }
-}
-
-/**
- * Post-process the hidden HTML container so that every
- * `<pre><code class="language-mermaid|katex|markmap">` block is
- * replaced with the corresponding rendered figure (SVG / HTML
- * fragment). The three renderers (`mermaid`, `katex`,
- * `markmap-view`) are loaded via dynamic `import()` from the
- * `devDependencies` declared in `package.json` — they don't
- * end up in the production bundle, only the import shim
- * Vite emits for them. The first call to a renderer triggers
- * module resolution and adds ~200ms to that export; subsequent
- * calls hit the module cache.
- *
- * Failure policy: any single block (or the entire post-process)
- * that throws is logged and the original `<pre>` is kept. The
- * main `generatePdfFromHtml` flow is never blocked by a
- * custom-block failure — a broken diagram should not stop the
- * rest of the document from being exported.
- */
-async function renderCustomBlocksForPdf(root: HTMLElement): Promise<void> {
-  // Select every fenced code block whose language tag is one of
-  // the three we know how to render. The selector intentionally
-  // targets `<pre><code>` (not bare `<code>`) so we never touch
-  // inline code spans, which can't be rendered as figures.
-  const blocks = Array.from(
-    root.querySelectorAll<HTMLPreElement>(
-      'pre > code.language-mermaid, pre > code.language-katex, pre > code.language-markmap',
-    ),
-  )
-  if (blocks.length === 0) return
-
-  // Dynamic import. The `as any` cast keeps TypeScript happy
-  // without forcing us to add `@types/mermaid` etc — these
-  // modules don't ship types and the cast is the same shape
-  // every other plugin uses. `.catch(() => null)` degrades
-  // gracefully when CSP blocks the import: the matching
-  // `if (mermaid)` / `if (katex)` / `if (markmap)` guards
-  // below then keep the original `<pre>` in place.
-  const [mermaid, katex, markmap] = await Promise.all([
-    import('mermaid' as any).catch(() => null),
-    import('katex' as any).catch(() => null),
-    import('markmap-view' as any).catch(() => null),
-  ])
-
-  // mermaid needs a one-time `initialize` per webview; we
-  // ignore re-init errors (the config is idempotent).
-  if (mermaid) {
-    try {
-      mermaid.default.initialize({
-        startOnLoad: false,
-        securityLevel: 'loose',
-      })
-    } catch (e) {
-      console.warn('[export] mermaid init failed', e)
-    }
-  }
-
-  for (const codeEl of blocks) {
-    const lang = CUSTOM_BLOCK_LANGS.find((l) =>
-      codeEl.classList.contains(`language-${l}`),
-    )
-    if (!lang) continue
-    const source = codeEl.textContent ?? ''
-    if (!source.trim()) continue
-
-    try {
-      // Use root.ownerDocument so elements are created in the
-      // same document context as the root (which may be an
-      // iframe's contentDocument). Using the global `document`
-      // would create elements in the host document, causing
-      // cross-document adoption issues.
-      const doc = root.ownerDocument
-      if (lang === 'mermaid' && mermaid) {
-        // mermaid needs a unique id per render; we generate a
-        // short random suffix to avoid clashes when the same
-        // document is exported multiple times in one session.
-        const id = `mermaid-export-${Math.random().toString(36).slice(2, 8)}`
-        const { svg } = await mermaid.default.render(id, source)
-        const wrap = doc.createElement('div')
-        wrap.className = 'export-mermaid'
-        wrap.innerHTML = svg
-        codeEl.parentElement?.replaceWith(wrap)
-      } else if (lang === 'katex' && katex) {
-        // `displayMode: true` so multi-line equations render as
-        // a centered block (matches how KaTeX shows them in
-        // BlockNote). `throwOnError: false` renders an
-        // unsupported macro as the literal source — much
-        // friendlier than a runtime crash.
-        const html = katex.default.renderToString(source, {
-          displayMode: true,
-          throwOnError: false,
-        })
-        const wrap = doc.createElement('div')
-        wrap.className = 'export-katex'
-        wrap.innerHTML = html
-        codeEl.parentElement?.replaceWith(wrap)
-      } else if (lang === 'markmap' && markmap) {
-        // markmap needs an explicit SVG size; without it the
-        // node sees `clientWidth = 0` in the hidden container
-        // and the layout silently fails. We then `mm.fit()` +
-        // a 200ms timer to let markmap's internal d3 transition
-        // settle before the canvas snapshot.
-        const { Markmap } = markmap
-        const svg = doc.createElementNS(
-          'http://www.w3.org/2000/svg',
-          'svg',
-        )
-        svg.setAttribute('class', 'export-markmap')
-        svg.style.width = '720px'
-        svg.style.height = '400px'
-        const mm = Markmap.create(svg, undefined, source)
-        await mm.fit()
-        await new Promise((r) => setTimeout(r, 200))
-        const wrap = doc.createElement('div')
-        wrap.className = 'export-markmap-wrap'
-        wrap.appendChild(svg)
-        codeEl.parentElement?.replaceWith(wrap)
-      }
-    } catch (e) {
-      // Per-block failure: log and leave the original <pre>.
-      // The loop continues with the next block.
-      console.warn(`[export] ${lang} render failed`, e)
-    }
-  }
-}
-
-/**
- * Render the HTML produced by the backend into a multi-page PDF
- * buffer. The implementation:
- *
- *  1. Parses the backend's full HTML document with `DOMParser`,
- *     extracts the `<style>` and `<body>` children, and mounts
- *     them into an off-screen container div. The CSS `body`
- *     selector is rewritten to target the container (via a unique
- *     class) so the styles apply correctly without affecting the
- *     host document's real `<body>`.
- *  2. Rewrites image references to Tauri's asset protocol (so
- *     `![](relative/path.png)` actually loads).
- *  3. Awaits every `<img>` load (with a single shared 8s deadline)
- *     so the screenshot doesn't capture half-rendered images.
- *  4. Groups the container's direct children into A4-sized pages by
- *     measuring each child's height and breaking when the running
- *     total exceeds one page's content area. Children that are
- *     themselves taller than a page (e.g. a `<pre>` with hundreds
- *     of lines) are split into multiple sub-pages by their own
- *     line-level measurement, so the rendered PDF never silently
- *     drops the tail of an oversized block.
- *  5. Renders **each page separately** to its own canvas via
- *     `modern-screenshot`, then emits one `pdf.addImage` per page.
- *     Bounded-canvas rendering means a 100-page export uses the
- *     same per-canvas memory as a 1-page export — a single-canvas
- *     strategy would OOM the webview on long documents.
- *
- * **Key design decisions:**
- *  - **No `visibility: hidden`**: `domToCanvas` copies computed
- *    styles to its internal clone; `visibility: hidden` produces
- *    a blank canvas. The container is moved off-screen with
- *    `transform: translateX(-200vw)` instead (paint-only, no
- *    layout reflow, so Tauri's resize detection never fires).
- *  - **No iframe**: `domToCanvas` renders via SVG foreignObject
- *    serialization, which fails silently on elements from iframe
- *    documents. Using the host document avoids cross-document
- *    issues entirely.
- *  - **`DOMParser` + CSS rewrite**: The backend returns a full
- *    `<!DOCTYPE html>` document. Setting it as `innerHTML` creates
- *    nested `<body>` elements and the CSS `body { }` selector
- *    matches the host's body. We parse the HTML, extract `<style>`
- *    and `<body>` children, and rewrite `body` → `.export-root`
- *    in the CSS so it targets our container.
- *
- * The function is intentionally side-effect free w.r.t. the
- * editor: every element it creates is removed in `finally`.
- */
-async function generatePdfFromHtml(
-  htmlContent: string,
-  notePath: string,
-): Promise<Uint8Array> {
-  // Inner content area per page: A4 height minus 20px top + 20px
-  // bottom padding. Children that don't fit trigger a page break.
-  const PAGE_INNER_HEIGHT = A4_HEIGHT_PX - 40
-
-  // Unique class for CSS scoping. The backend's CSS has
-  // `body { width:794px; margin:0 auto; padding:20px; … }` which
-  // we rewrite to `.export-root { … }` so it targets our container
-  // instead of the host document's real `<body>`.
-  const ROOT_CLASS = 'export-root'
-
-  // Parse the backend's full HTML document. DOMParser gives us a
-  // clean document fragment without triggering scripts or loading
-  // resources, and lets us extract <style> and <body> children
-  // individually instead of creating nested <html>/<head>/<body>
-  // elements inside a div.
-  const parsed = new DOMParser().parseFromString(htmlContent, 'text/html')
-  const styleEl = parsed.querySelector('style')
-  const parsedBody = parsed.body
-
-  // Rewrite the CSS: replace `body` selector with our container
-  // class so styles apply to the container, not the host body.
-  // We only replace the selector, not the rules themselves.
-  let cssText = styleEl?.textContent ?? ''
-  cssText = cssText.replace(/\bbody\s*\{/g, `.${ROOT_CLASS} {`)
-
-  // Create the style element that will be scoped to our container.
-  const scopedStyle = document.createElement('style')
-  scopedStyle.textContent = cssText
-
-  // Off-screen container: `transform: translateX(-200vw)` is
-  // paint-only (no layout reflow), so Tauri's resize detection
-  // never fires. NO `visibility: hidden` — domToCanvas copies
-  // computed styles to its clone, and `visibility: hidden` makes
-  // the clone invisible, producing a blank canvas. The container
-  // is already off-screen via the transform.
-  const container = document.createElement('div')
-  container.className = ROOT_CLASS
-  container.style.cssText = [
-    'position: fixed',
-    'left: 0',
-    'top: 0',
-    'transform: translateX(-200vw)',
-    `width: ${A4_WIDTH_PX}px`,
-    'z-index: -1',
-    'background: #fff',
-    'pointer-events: none',
-    // Inline the body styles as fallback in case CSS rewrite
-    // missed something (belt-and-braces).
-    'margin: 0 auto',
-    'padding: 20px',
-    'box-sizing: border-box',
-  ].join(';')
-
-  // Inject the scoped style and body children into the container.
-  container.appendChild(scopedStyle)
-  // Import nodes from the parsed document into the host document.
-  for (const child of Array.from(parsedBody.children)) {
-    container.appendChild(document.importNode(child, true))
-  }
-  document.body.appendChild(container)
-
-  // Page containers that we need to remove in the finally block.
-  const pageContainers: HTMLElement[] = []
-
-  try {
-    // Pre-flight: rewrite <img> refs and wait for them to load.
-    resolveImageSources(container, notePath)
-    // Custom-block post-process: render every mermaid / katex /
-    // markmap fenced block so the canvas snapshot picks up the
-    // figure instead of the raw source. Wrapped in try/catch so
-    // a broken diagram never blocks the rest of the PDF.
-    try {
-      await renderCustomBlocksForPdf(container)
-    } catch (e) {
-      console.warn('[export] renderCustomBlocksForPdf failed', e)
-    }
-    await waitForImages(container)
-
-    // Group container's direct children into pages by height.
-    // Skip the <style> element we injected — it's not content.
-    const children = Array.from(container.children).filter(
-      (el) => el.tagName !== 'STYLE',
-    ) as HTMLElement[]
-    const pages: HTMLElement[][] = (() => {
-      const result: HTMLElement[][] = []
-      let current: HTMLElement[] = []
-      let currentHeight = 0
-      for (const child of children) {
-        const h = child.getBoundingClientRect().height
-        if (h > PAGE_INNER_HEIGHT) {
-          if (current.length > 0) {
-            result.push(current)
-            current = []
-            currentHeight = 0
-          }
-          for (const part of splitOversizedChild(child, PAGE_INNER_HEIGHT)) {
-            result.push([part])
-          }
-          continue
-        }
-        if (currentHeight + h > PAGE_INNER_HEIGHT && current.length > 0) {
-          result.push(current)
-          current = []
-          currentHeight = 0
-        }
-        current.push(child)
-        currentHeight += h
-      }
-      if (current.length > 0) result.push(current)
-      return result
-    })()
-
-    const pdf = new jsPDF('p', 'mm', 'a4')
-    const pdfWidth = pdf.internal.pageSize.getWidth()
-    const pdfHeight = pdf.internal.pageSize.getHeight()
-
-    for (let i = 0; i < pages.length; i++) {
-      // Each page is its own container with bounded height so the
-      // canvas is bounded — this is the core of the multi-segment
-      // strategy. `overflow: hidden` clips content that doesn't fit.
-      // NO `visibility: hidden` — the element must be visible for
-      // domToCanvas. The parent container is already off-screen.
-      const pageEl = document.createElement('div')
-      pageEl.className = ROOT_CLASS
-      pageEl.style.cssText = [
-        'position: relative',
-        `width: ${A4_WIDTH_PX}px`,
-        `height: ${A4_HEIGHT_PX}px`,
-        'background: #fff',
-        'padding: 20px',
-        'box-sizing: border-box',
-        'overflow: hidden',
-      ].join(';')
-      // Deep-clone the children. The scoped <style> rules are in
-      // the host document's scope, so cloned children pick up the
-      // same fonts/colors/margins they had in the master.
-      for (const child of pages[i]) {
-        pageEl.appendChild(child.cloneNode(true))
-      }
-      container.appendChild(pageEl)
-      pageContainers.push(pageEl)
-
-      // cloneNode(true) creates fresh <img> elements that haven't
-      // loaded yet, so we have to re-resolve and re-wait even
-      // though the originals have completed loading in the master.
-      resolveImageSources(pageEl, notePath)
-      await waitForImages(pageEl)
-
-      const canvas = await domToCanvas(pageEl, {
-        scale: 2,
-        width: A4_WIDTH_PX,
-        height: A4_HEIGHT_PX,
-        backgroundColor: '#ffffff',
-      })
-      const imgData = canvas.toDataURL('image/png')
-      const imgWidth = pdfWidth
-      const imgHeight = (canvas.height * pdfWidth) / canvas.width
-      pdf.addImage(imgData, 'PNG', 0, 0, imgWidth, Math.min(imgHeight, pdfHeight))
-
-      if (i < pages.length - 1) {
-        pdf.addPage()
-      }
-    }
-
-    return new Uint8Array(pdf.output('arraybuffer'))
-  } finally {
-    for (const el of pageContainers) {
-      if (el.parentNode) el.parentNode.removeChild(el)
-    }
-    if (container.parentNode) container.parentNode.removeChild(container)
-  }
-}
-
 // ─── Toolbar button component (dropdown menu) ────────────────────────────────
 
 function ExportToolbarButton(props: ToolbarButtonProps): ReactNode {
   const {
     size,
-    invokeBackend,
     activeNoteContent,
     activeNotePath,
     activeNoteName,
     activeNoteExt,
   } = props
   const [menuOpen, setMenuOpen] = useState(false)
-  // We track the in-flight state via both a ref (for synchronous
-  // guard, so double-clicks inside the same microtask don't
-  // double-fire) and a state variable (for re-rendering the UI).
+  // 导出锁：ref 做同步防抖（同一微任务内双击不重复触发），state 驱动 UI
   const exportingRef = useRef(false)
   const [isExporting, setIsExporting] = useState(false)
   const menuRef = useRef<HTMLDivElement>(null)
-  // The plugin reads its own locale (no `react-i18next` runtime
-  // needed). `readLocale()` is called at render time so a host
-  // re-render that updates `window.__SWALLOW_LOCALE__` will be
-  // picked up on the next render.
   const strings = getStrings(readLocale())
 
   const isMarkdown = activeNoteExt === 'md' || activeNoteExt === 'markdown'
 
   // Derive note name from path. Falls back to the full path so
-  // the user always sees a meaningful filename in the save
-  // dialog. Prefers the host-supplied `activeNoteName` so the
-  // path-parsing rules stay in one place.
-  // 注意：此处必须使用 `||` 链而非三元运算符。原写法
-  // `activeNoteName || activeNotePath ? ... : 'untitled'` 因三元
-  // 优先级低于 `||`，等价于 `(activeNoteName || activeNotePath) ? ...`
-  // 导致 true 分支完全忽略 `activeNoteName`，与注释意图相悖。
+  // the user always sees a meaningful filename. Prefers the
+  // host-supplied `activeNoteName`（注意 `||` 链不可改三元，见旧版注释）
   const noteName = activeNoteName
     || activeNotePath.split('/').pop()
     || activeNotePath
     || 'untitled'
 
-  // The export is only enabled when the active note has content.
-  // We compare against the *raw* `activeNoteContent` because the
-  // normalisation step (whitespace trimming) happens inside the
-  // handlers, and a document with only whitespace is still
-  // considered "empty".
   const hasContent = activeNoteContent.trim().length > 0
 
   // Close menu on outside click.
@@ -898,27 +147,23 @@ function ExportToolbarButton(props: ToolbarButtonProps): ReactNode {
   }, [menuOpen])
 
   /**
-   * Shared scaffolding for the export flows. Centralises the
-   * synchronous guard, the toast lifecycle, the save dialog, and
-   * the base64 file write. The actual conversion happens inside
-   * `produce` so the three formats can share the same UX plumbing.
-   * HTML is wired through the same path as DOCX/PDF — the backend
-   * already produces a complete HTML document via `markdown_to_html`
-   * (the same one the PDF path feeds into `domToCanvas`), so we
-   * reuse it for the direct-save variant instead of going through
-   * the PDF rasteriser.
+   * 导出流程统一脚手架：导出锁 → loading toast → produce() →
+   * 成功 toast 展示宿主返回的最终落盘路径。保存对话框已移除
+   * （方案 E：宿主固定写入系统下载目录，不接受任意路径）。
    */
   const runExport = useCallback(
-    async (
-      format: 'docx' | 'pdf' | 'html',
-      produce: () => Promise<Uint8Array | string>,
-    ) => {
-      // Synchronous guard: a second click inside the same
-      // microtask (e.g. double-click) is dropped before the
-      // async setter has a chance to flip the state.
+    async (format: 'docx' | 'pdf' | 'html', produce: () => Promise<string>) => {
       if (exportingRef.current) return
       if (!hasContent) {
         toast.info(strings.emptyNote)
+        return
+      }
+      const bridge = getExportBridge()
+      if (!bridge) {
+        toast.error(strings.exportFailed, {
+          description:
+            '当前宿主版本不支持导出原语（__snExportBridge 缺失），请升级 SwallowNote 主程序',
+        })
         return
       }
       exportingRef.current = true
@@ -927,47 +172,20 @@ function ExportToolbarButton(props: ToolbarButtonProps): ReactNode {
       const toastId = toast.loading(strings.generating)
       try {
         const result = await produce()
-        const ext = format
-        const fileName =
-          (noteName || 'untitled').replace(/\.(md|markdown)$/i, '') +
-          `.${ext}`
-        const defaultPath = fileName
-        const filters =
-          format === 'docx'
-            ? [{ name: 'Word Document', extensions: ['docx'] }]
-            : format === 'pdf'
-              ? [{ name: 'PDF Document', extensions: ['pdf'] }]
-              : [{ name: 'HTML Document', extensions: ['html', 'htm'] }]
-        const selected = await save({ defaultPath, filters })
-        if (!selected) {
-          // User cancelled the save dialog. The loading toast must
-          // be dismissed explicitly — none of the success/error
-          // branches below will run, so without this `toastId` is
-          // orphaned and "正在生成…" stays on screen forever.
+        if (format === 'pdf') {
+          // PDF 走打印预览窗口：用户在系统打印对话框中"存储为 PDF"
+          toast.success(strings.previewOpened, { id: toastId })
+        } else {
+          toast.success(`${strings.exportSuccess}: ${result}`, { id: toastId })
+        }
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        // 用户在保存对话框取消 —— 静默关闭 loading，不提示错误
+        if (message.includes('__cancelled__')) {
           toast.dismiss(toastId)
           return
         }
-        const filePath = (selected as string).replace(/\\/g, '/')
-        // `write_binary_file` 后端强制 base64 解码。
-        // - DOCX: 后端返回的已是 base64 字符串，直接写入。
-        // - HTML: 后端返回原始 HTML 文本，用 `strToBase64` 编码。
-        //   不用 `uint8ToBase64(TextEncoder.encode(...))` 因为
-        //   `strToBase64` 更直接（内部已做 UTF-8 编码）。
-        // - PDF: 前端生成的 `Uint8Array`，走 `uint8ToBase64`。
-        //   两者均使用 chunked `btoa`，同步且不依赖 FileReader。
-        const b64 = typeof result === 'string'
-          ? (format === 'html'
-              ? strToBase64(result)
-              : result)
-          : uint8ToBase64(result)
-        await invoke('write_binary_file', { path: filePath, data: b64 })
-        toast.success(strings.exportSuccess, { id: toastId })
-      } catch (err) {
-        // B4：宿主透传 JSON-RPC error 的 code/data，后端错误 reject 为 SDK
-        // `PluginError`（携带结构化 code），按 instanceof 分支业务错误码；
-        // 传输层/前端错误仍是普通 Error 或字符串，走默认 toast。文案保持不变。
-        const message = err instanceof Error ? err.message : String(err)
-        if (err instanceof PluginError && err.code === ERR_MARKDOWN_TOO_LARGE) {
+        if (message.includes('Markdown too large') || message.includes('too large')) {
           toast.error(strings.tooLarge, { id: toastId, description: message })
         } else if (format === 'pdf') {
           toast.error(strings.pdfExportFailed, { id: toastId, description: message })
@@ -981,62 +199,76 @@ function ExportToolbarButton(props: ToolbarButtonProps): ReactNode {
         setIsExporting(false)
       }
     },
-    [hasContent, noteName, strings],
+    [hasContent, strings],
   )
+
+  /** 解析当前笔记的工作区根（宿主 fs_guard 图片读取白名单用） */
+  const workspaceRoot = useCallback((): string | null => {
+    const bridge = getExportBridge()
+    return bridge?.getWorkspaceRoot(activeNotePath) ?? null
+  }, [activeNotePath])
 
   const handleExportDocx = useCallback(async () => {
     const markdown = compactMarkdown(activeNoteContent)
     await runExport('docx', async () => {
-      // 并行收集图片资源和渲染前端渲染类代码块
-      const [imageAssets, renderedAssets] = await Promise.all([
-        collectImageAssets(markdown, activeNotePath),
-        renderCustomBlocksForDocx(markdown),
-      ])
-      const b64 = (await invokeBackend('markdown_to_docx', {
+      const bridge = getExportBridge()!
+      // 采集主题（同步）→ 渲染自定义代码块为 PNG base64；
+      // 图片读取已迁入宿主（note_path 解析相对路径），插件不再传 image_assets
+      const theme = bridge.collectExportTheme()
+      const renderedAssets = await bridge.renderCustomBlocks(markdown, 'docx')
+      const result = await invoke<HostExportResult>('export_docx', {
+        workspaceRoot: workspaceRoot(),
+        notePath: activeNotePath,
         markdown,
-        // 键名必须与后端 main.rs 的 JSON-RPC 参数一致（snake_case），
-        // camelCase 会被后端忽略 → DOCX 图片/预渲染图静默丢失（I7）
-        image_assets: imageAssets,
-        rendered_assets: renderedAssets,
-      })) as string
-      return b64
+        theme,
+        renderedAssets,
+        fileName: noteName,
+      })
+      return result.path
     })
-  }, [activeNoteContent, activeNotePath, invokeBackend, runExport])
+  }, [activeNoteContent, activeNotePath, noteName, workspaceRoot, runExport])
 
   const handleExportPdf = useCallback(async () => {
     const markdown = compactMarkdown(activeNoteContent)
     await runExport('pdf', async () => {
-      const html = (await invokeBackend('markdown_to_html', {
+      const bridge = getExportBridge()!
+      const theme = bridge.collectExportTheme()
+      const renderedAssets = await bridge.renderCustomBlocks(markdown, 'html')
+      // 宿主生成主题化 HTML（不落盘），auto_print 注入后打开预览窗口，
+      // load 300ms 后自动弹系统打印对话框 —— 用户"存储为 PDF"
+      const html = await invoke<string>('generate_export_html', {
+        workspaceRoot: workspaceRoot(),
+        notePath: activeNotePath,
         markdown,
-      })) as string
-      return await generatePdfFromHtml(html, activeNotePath)
+        theme,
+        renderedAssets,
+        autoPrint: true,
+      })
+      await invoke('open_print_preview', { html })
+      return ''
     })
-  }, [activeNoteContent, activeNotePath, invokeBackend, runExport])
+  }, [activeNoteContent, activeNotePath, workspaceRoot, runExport])
 
-  // HTML export reuses the backend's `markdown_to_html` response
-  // (the same one the PDF path uses internally to drive the
-  // rasteriser) and saves it directly as a `.html` file. No
-  // canvas / pagination logic needed — the file the user opens
-  // in a browser will be a pixel-perfect mirror of what the
-  // editor previewed (modulo fonts / stylesheet differences on
-  // the viewing machine).
   const handleExportHtml = useCallback(async () => {
     const markdown = compactMarkdown(activeNoteContent)
     await runExport('html', async () => {
-      return (await invokeBackend('markdown_to_html', {
+      const bridge = getExportBridge()!
+      const theme = bridge.collectExportTheme()
+      const renderedAssets = await bridge.renderCustomBlocks(markdown, 'html')
+      // HTML 落盘下载目录；渲染产物/图片已内嵌，单文件离线可用
+      const result = await invoke<HostExportResult>('export_html', {
+        workspaceRoot: workspaceRoot(),
+        notePath: activeNotePath,
         markdown,
-      })) as string
+        theme,
+        renderedAssets,
+        fileName: noteName,
+      })
+      return result.path
     })
-  }, [activeNoteContent, invokeBackend, runExport])
+  }, [activeNoteContent, activeNotePath, noteName, workspaceRoot, runExport])
 
-  // Markdown-only: the backend serialises Markdown to HTML / DOCX /
-  // PDF, so the toolbar button only makes sense for Markdown files.
-  // The host passes the lower-cased `activeNoteExt` (without the
-  // leading dot) so we can branch on the extension directly
-  // instead of re-parsing `activeNotePath`. Returning `null` for
-  // non-Markdown files hides the entire dropdown (and its icon)
-  // from the editor toolbar, which is the desired behaviour for
-  // `Code` / `Binary` / `MindMap` notes.
+  // 仅 Markdown 笔记显示导出入口（非 md 返回 null 隐藏整个下拉）
   if (!isMarkdown) {
     return null
   }
@@ -1118,12 +350,8 @@ function ExportPanel(_props: PluginPanelProps): ReactNode {
   return null
 }
 
-// ─── Manifest ─────────────────────────────────────────────────────────────
-//
-// manifest 静态字段（id / name / permissions / ...）单一来源是工程根的
-// ../manifest.json；icon/panel/toolbarButton 组件由 definePlugin 注入。
-// `hasBackend` 不属于 PluginManifest：宿主安装 zip 时按 backend/ 是否存在
-// 自动填充到 PluginDefinition（见 SDK 文档）。
+// manifest 静态字段单一来源是工程根的 ../manifest.json；icon/panel/
+// toolbarButton 组件由 definePlugin 注入。
 // 供回归测试直接挂载工具栏按钮（宿主运行时仍走 definePlugin 注册）
 export { ExportToolbarButton }
 

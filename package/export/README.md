@@ -2,6 +2,15 @@
 
 > 以「文档导出」插件为例，完整演示如何开发一个包含 Rust 后端的 SwallowNote 插件。
 
+> **⚠ 架构变更（v0.3.0，2026-11-22）**：本文档基于 v0.2.x 的"插件自包含后端"架构撰写。
+> v0.3.0 起导出插件已**薄壳化**：DOCX/HTML 转换、图片读取、mermaid/katex/markmap 渲染
+> 全部内置宿主主程序（`src-tauri/src/commands/export` 模块），插件仅保留 UI，经
+> `export_docx` / `export_html` / `generate_export_html` / `open_print_preview` 宿主命令
+> 与 `window.__snExportBridge` 桥调用。**本插件需 SwallowNote 主程序 ≥ v0.3.0 配套版本
+> （与插件同批发布），装在旧宿主上将无法导出**。宿主命令签名见
+> `SwallowNote/src-tauri/src/commands/export/mod.rs`。本文其余章节作为自包含后端插件的
+> 通用开发教程仍具参考价值，但不再描述本插件的实际架构。
+
 ---
 
 ## 目录

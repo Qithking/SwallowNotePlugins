@@ -2,7 +2,9 @@
   "compilerOptions": {
     "target": "ES2020",
     "useDefineForClassFields": true,
-    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    // lib 升 ES2022：代码使用 Array.prototype.at（ES2022 API），
+    // 宿主 webview（Chromium/WKWebView）运行时已支持；target 保持 ES2020
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",

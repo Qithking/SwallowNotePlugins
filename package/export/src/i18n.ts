@@ -18,6 +18,8 @@ interface ExportStrings {
   emptyNote: string
   /** 后端拒绝请求时返回 */
   tooLarge: string
+  /** PDF 打印预览窗口已打开（用户在系统打印对话框"存储为 PDF"） */
+  previewOpened: string
   /** 导出下拉触发器的 tooltip / aria-label */
   tooltip: string
 }
@@ -33,6 +35,7 @@ const zhCN: ExportStrings = {
   generating: '正在生成…',
   emptyNote: '当前笔记为空，无需导出',
   tooLarge: '文档过大，无法导出',
+  previewOpened: '已打开打印预览，请在打印对话框中选择"存储为 PDF"',
   tooltip: '导出当前笔记',
 }
 
@@ -47,6 +50,7 @@ const en: ExportStrings = {
   generating: 'Generating…',
   emptyNote: 'The current note is empty, nothing to export',
   tooLarge: 'Document too large to export',
+  previewOpened: 'Print preview opened — choose "Save as PDF" in the print dialog',
   tooltip: 'Export the current note',
 }
 

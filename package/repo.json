@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-18T08:43:27Z",
+  "updated_at": "2026-11-22T03:51:52Z",
   "plugins": [
     {
       "id": "com.swallownote.mindmap",
@@ -29,7 +29,7 @@
     {
       "id": "com.swallownote.export",
       "name": "文档导出",
-      "version": "0.2.5",
+      "version": "0.3.2",
       "description": "将 Markdown 文档导出为 Word (.docx) / PDF / HTML 格式",
       "author": "SwallowNote",
       "tags": [
@@ -40,11 +40,11 @@
         "html"
       ],
       "download_url": "./com.swallownote.export.zip",
-      "sha256": "7037fd6777ab1066f20f6b26aa3b174e027dc120b57eee8ebd169ae2c8987344",
+      "sha256": "4035b372ae080bc3152a7ddbe20bb206d22944ade99cd874cfac4154ea33f87a",
       "changelog": "重新发布: 跨平台包布局(backend 平台子目录)",
-      "published_at": "2026-11-18T08:43:26Z",
+      "published_at": "2026-11-22T03:51:52Z",
       "dependencies": [],
-      "signature_b64": "JS25VsKfwfsg71BnqN8blBuNe3RTOXYNsK/aM9MLxWcSYUHqAgz0d4jMTIpSHNc5ScktxJeCe2TH5x1j4l8tCA==",
+      "signature_b64": "RxVEGjG1LGuhmj//rUXJ2WwPF1SAlf29LjbN6imskqMoLAAfp1xbGOTrk7nFCcOelUXeeR6TGSBKUYfwTe9nBA==",
       "permissions": [
         "backend"
       ]
@@ -156,5 +156,5 @@
       ]
     }
   ],
-  "pubkey_b64": "LCoNiX5mUrSXX3zq3p+ylQnRi+xKafJ//iQFrnGdif8="
+  "pubkey_b64": "Tf9toXVZBmSmMQ35YSSB9mnhT+T5ixSnDZxo6E/GpXY="
 }
