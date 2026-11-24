@@ -770,19 +770,24 @@ dispatch_single_plugin_ci() {
     # 选择插件（CI dispatch 一次只传一个插件，多选则逐个触发）
     select_plugins || return 1
 
-    # 发布目标 tag（release 资产挂载点）：默认最新 plugin-v* tag
-    default_tag=$(get_current_version)
-    if [ -n "$default_tag" ]; then
-        echo_info "当前最新版本 tag: $default_tag"
+    # 发布目标 tag（release 资产挂载点）：留空推荐最新 tag +1（新建 release，
+    # CI 会自动从上一个 release 继承其它插件 zip，保证市场相对 URL 不 404）；
+    # 输入已有 tag 则挂载到现有 release（覆盖同名资产）
+    latest_tag=$(get_current_version)
+    if [ -z "$latest_tag" ]; then
+        echo_error "仓库还没有 plugin-v* tag，请先通过菜单 2 发布首个版本"
+        return 1
     fi
+    if [[ "$latest_tag" =~ ^plugin-v([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+        recommended_tag="plugin-v${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+    else
+        recommended_tag="$latest_tag"
+    fi
+    echo_info "当前最新版本 tag: $latest_tag"
     echo ""
-    read -p "输入发布目标 tag (留空=${default_tag:-无，将自动创建}): " target_tag
+    read -p "输入发布目标 tag (留空=$recommended_tag 新建 release；输入 $latest_tag 挂现有 release): " target_tag
     if [ -z "$target_tag" ]; then
-        if [ -z "$default_tag" ]; then
-            echo_error "仓库还没有 plugin-v* tag，请先通过菜单 2 发布首个版本"
-            return 1
-        fi
-        target_tag="$default_tag"
+        target_tag="$recommended_tag"
     fi
 
     # 构建代码源分支：默认当前分支（插件最新代码），可指定

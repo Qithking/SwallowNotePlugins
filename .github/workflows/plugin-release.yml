@@ -139,8 +139,10 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           ver=$(node -p "require('./package/$RELEASE_PLUGIN/package.json').version")
-          gh run rename "$GITHUB_RUN_ID" --repo "$GITHUB_REPOSITORY" \
-            --name "插件发布: $RELEASE_PLUGIN v$ver"
+          # gh run rename 在旧版 gh CLI 不存在（unknown flag），改用 REST API PATCH，
+          # 所有 gh 版本通用
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            -f name="插件发布: $RELEASE_PLUGIN v$ver"
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
@@ -209,8 +211,8 @@ jobs:
           find . -name "repo.json" -not -path "*/node_modules/*" | sort
           cat package/repo.json | head -30
 
-      # 发布目标 tag：workflow_dispatch 用 input.tag（缺省取最新 plugin-v* tag），
-      # tag push 用触发 tag 本身；release 不存在则创建（--generate-notes 等价原 softprops）
+      # 发布目标 tag：workflow_dispatch 用 input.tag（release.sh 默认推荐最新 tag+1，
+      # 直接传 input 时 release 不存在则创建），tag push 用触发 tag 本身
       - name: Resolve Target Tag
         run: |
           if [ -n "$RELEASE_TAG" ]; then
@@ -227,13 +229,35 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 目标 release 不存在则创建（单插件发布通常指向已有 release）
-          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1 || \
+          # 目标 release 不存在则创建（单插件发布推荐最新 tag+1，走此路径）
+          NEW_RELEASE=0
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "挂载到已有 release: $RELEASE_TAG"
+          else
             gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --generate-notes --repo "$GITHUB_REPOSITORY"
+            NEW_RELEASE=1
+          fi
+
+          upload_args=()
+          # 单插件发布 + 新建 release：从上一个 release 继承其它插件 zip。
+          # 否则新 release 只含单插件包，GitHub latest 切换后 repo.json 相对
+          # URL（./com.*.zip）会让其它插件市场下载 404
+          if [ "$NEW_RELEASE" = "1" ] && [ -n "$RELEASE_PLUGIN" ]; then
+            PREV=$(gh release list --repo "$GITHUB_REPOSITORY" --limit 10 \
+              -q "[.[] | select(.tagName != \"$RELEASE_TAG\")][0].tagName" 2>/dev/null || true)
+            if [ -n "$PREV" ] && [ "$PREV" != "null" ]; then
+              echo "继承上一个 release $PREV 的插件包..."
+              mkdir -p carried
+              gh release download "$PREV" -p 'com.swallownote.*.zip' -D carried --repo "$GITHUB_REPOSITORY" || true
+              for f in carried/*.zip; do [ -f "$f" ] && upload_args+=("$f"); done
+            fi
+          fi
+
           # 指定插件时只上传该插件 zip（--clobber 覆盖同名资产）+ 回传最新 repo.json
           if [ -n "$RELEASE_PLUGIN" ]; then
-            gh release upload "$RELEASE_TAG" "package/$RELEASE_PLUGIN/"com.swallownote.*.zip package/repo.json --clobber --repo "$GITHUB_REPOSITORY"
+            upload_args+=("package/$RELEASE_PLUGIN/"com.swallownote.*.zip)
           else
-            gh release upload "$RELEASE_TAG" package/*/com.swallownote.*.zip package/repo.json --clobber --repo "$GITHUB_REPOSITORY"
+            upload_args+=(package/*/com.swallownote.*.zip)
           fi
+          gh release upload "$RELEASE_TAG" "${upload_args[@]}" package/repo.json --clobber --repo "$GITHUB_REPOSITORY"
           echo "已上传资产到 release $RELEASE_TAG"
