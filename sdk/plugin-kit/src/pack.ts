@@ -39,10 +39,25 @@ function isBackendBinary(project: PluginProject, name: string): boolean {
 }
 
 export interface BackendFile {
-  /** zip 内相对路径（backend/ 之后的部分） */
+  /** zip 内相对路径（backend/ 之后的部分，二进制名已归一化为宿主约定） */
   rel: string
   /** 磁盘路径 */
   abs: string
+}
+
+/**
+ * 归一化 zip 内二进制名为宿主 resolve_backend_binary 的约定名：
+ * plugin_<id>（点分 pluginId，如 plugin_com.swallownote.secret-disk）+ .exe 后缀保留。
+ * 背景：Cargo [[bin]] name 只能是下划线名（plugin_com_swallownote_secret_disk），
+ * 宿主解析只认点分名，CI 产物若不归一化会导致所有平台 backend not found
+ * （Windows 上 flat 兜底也无 .exe 点分名，密盘面板必挂）。
+ */
+function normalizeBackendRel(project: PluginProject, sourceRel: string): string {
+  const slash = sourceRel.lastIndexOf('/')
+  const dir = slash >= 0 ? `${sourceRel.slice(0, slash)}/` : ''
+  const name = slash >= 0 ? sourceRel.slice(slash + 1) : sourceRel
+  const exeSuffix = name.toLowerCase().endsWith('.exe') ? '.exe' : ''
+  return `${dir}plugin_${project.pluginId}${exeSuffix}`
 }
 
 /**
@@ -50,28 +65,35 @@ export interface BackendFile {
  *  - dist/backend/：package 命令现构建的当前平台二进制（根文件）及其下的平台子目录；
  *  - <pluginDir>/backend/<平台>/：CI 三平台产物（放在 dist 外，避免被 vite build 清空）。
  * 插件根 backend/ 的根文件属于 dev 构建副本，不收集，避免与 dist 内文件重复入包。
+ * zip 内条目名统一归一化为点分约定名；同名冲突（点分/下划线并存）按源名排序
+ * 取首个（'.' < '_'，点分名优先），保证 zip 字节确定。
  */
 export function collectBackendFiles(project: PluginProject): BackendFile[] {
-  const found = new Map<string, string>()
+  // 先按源相对路径收集为候选列表（可能有多种命名风格的同一二进制）
+  const candidates: Array<{ sourceRel: string; abs: string }> = []
   const scan = (dir: string, allowRootFile: boolean): void => {
     if (!existsSync(dir)) return
     for (const entry of readdirSync(dir)) {
       const full = join(dir, entry)
       if (!statSync(full).isDirectory()) {
-        if (allowRootFile && isBackendBinary(project, entry)) found.set(entry, full)
+        if (allowRootFile && isBackendBinary(project, entry)) candidates.push({ sourceRel: entry, abs: full })
         continue
       }
       for (const f of readdirSync(full)) {
-        if (isBackendBinary(project, f)) found.set(`${entry}/${f}`, join(full, f))
+        if (isBackendBinary(project, f)) candidates.push({ sourceRel: `${entry}/${f}`, abs: join(full, f) })
       }
     }
   }
   scan(join(project.dir, 'dist', 'backend'), true)
   scan(join(project.dir, 'backend'), false)
-  // 排序保证 zip 字节确定（readdir 顺序依赖文件系统）
-  return [...found.entries()]
-    .map(([rel, abs]) => ({ rel, abs }))
-    .sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0))
+  // 排序保证 zip 字节确定（readdir 顺序依赖文件系统）；同名归一化冲突时点分名源优先
+  candidates.sort((a, b) => (a.sourceRel < b.sourceRel ? -1 : a.sourceRel > b.sourceRel ? 1 : 0))
+  const found = new Map<string, string>()
+  for (const c of candidates) {
+    const rel = normalizeBackendRel(project, c.sourceRel)
+    if (!found.has(rel)) found.set(rel, c.abs)
+  }
+  return [...found.entries()].map(([rel, abs]) => ({ rel, abs }))
 }
 
 /** Node 平台/架构 → 打包平台目录名（与宿主 host_platform_dir 命名约定一致）。 */
