@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "updated_at": "2026-11-22T03:51:52Z",
+  "updated_at": "2026-11-25T12:27:40Z",
   "plugins": [
     {
       "id": "com.swallownote.mindmap",
@@ -103,7 +103,7 @@
     {
       "id": "com.swallownote.secret-disk",
       "name": "密盘",
-      "version": "0.1.9",
+      "version": "0.1.11",
       "description": "加密的私有笔记空间，所有数据以 markdown 存储于严格加密的 SQLite 数据库（.swl）。",
       "author": "SwallowNote",
       "tags": [
@@ -114,15 +114,18 @@
         "markdown"
       ],
       "download_url": "./com.swallownote.secret-disk.zip",
-      "sha256": "639c5b3a62be3f0a2e825468300fe0311e79323c140a0f41ba7e1c5dcb4ddab7",
+      "sha256": "50d9b6a88948bc9b63f0897413f1895907d70a8c229c0888309bc55a3367fdfb",
       "changelog": "重新发布: 跨平台包布局(backend 平台子目录)",
-      "published_at": "2026-11-18T08:43:27Z",
+      "published_at": "2026-11-25T12:25:58Z",
       "dependencies": [],
-      "signature_b64": "zobZ6HqXB7qUxazHGOS6upG2F2/ymKPNvtxsTa4HgxI33lzrzcc/8Gu2uPElGVHY7P89dfyolnHumSNxQM+nAQ==",
+      "signature_b64": "uRBAx3hTuRzp/F2bI/Zmh/uehjyfVlwxt3LlUU46u0bUBJE7HSDjJRY/K4Zf+/9vs5Wkj/egJjrbygPHkWDPAg==",
       "permissions": [
         "storage",
         "events",
         "backend"
+      ],
+      "platforms": [
+        "darwin-aarch64"
       ]
     },
     {
